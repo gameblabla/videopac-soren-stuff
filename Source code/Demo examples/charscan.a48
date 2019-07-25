@@ -1,0 +1,291 @@
+; Display charset bitmap data.
+
+; Version 1.0
+
+; $Id: charscan.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; This program prints one char and uses a sprite to scan for the bitmap
+; of the char which is then printed. This is tricky, because the collision
+; handling of the original console is really strange, collisions are mostly
+; always triggered when the pixels are next to each other. So I use the
+; higher pixel resolution of the sprite and only set a bit if both sub pixels
+; are collided. This only works when using vdc_coll_char as collision target,
+; checking with vdc_coll_spr0 fails when there is a one pixel hole in the char,
+; like in $.
+
+; Press "1" for next char or "0" for previous char.
+
+; I have used this together with charset.a48 to check the o2em char bitmap
+; data.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is ugly, badly commented, unsupported code!
+
+	cpu	8048
+
+	org	400h
+	
+	include	"g7000.h"
+
+iram_char	equ	020h
+iram_bitmap	equ	021h
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	call	gfxoff
+	mov	a,#col_grd_white
+	mov	r0,#vdc_color
+	movx	@r0,a
+
+	section setshape
+	mov	r0,#vdc_spr0_shape
+	mov	a,#1
+	movx	@r0,a
+	inc	r0
+	mov	r2,#7
+	clr	a
+.loop	movx	@r0,a
+	inc	r0
+	djnz	r2,.loop
+	endsection setshape
+
+	; set initial char
+	mov	r0,#iram_char
+	mov	a,#0
+	mov	@r0,a
+
+newchar
+	; print char
+	call	gfxoff
+	mov	r0,#iram_char
+	mov	a,@r0
+	mov	r5,a
+	mov	r0,#vdc_char0
+	mov	r3,#20h		; x-position
+	mov	r4,#20h		; y-position
+	mov	r6,#col_chr_white
+	call	printchar	; print it
+
+	mov	r4,#020h
+	mov	r1,#iram_bitmap
+loop1	
+	mov	r7,#0
+	mov	r3,#01fh
+loop2
+	; set position, first subpixel
+	call	gfxoff
+	mov	r0,#vdc_spr0_ctrl
+	mov	a,r4
+	movx	@r0,a
+	inc	r0
+	mov	a,r3
+	movx	@r0,a
+	inc	r0
+	mov	a,#col_spr_red+1
+	movx	@r0,a
+	mov	r0,#vdc_collision
+	mov	a,#vdc_coll_char
+	movx	@r0,a
+	call	gfxon
+	call	waitvsync
+	mov	r0,#iram_collision
+	mov	a,@r0
+	anl	a,#001h
+	mov	r6,a
+
+	;;call	gfxoff
+	;;mov	r0,#iram_collision
+	;;mov	a,@r0
+	;;mov	r0,#vdc_gridh0
+	;;movx	@r0,a
+	;;call	gfxon
+	;;call	waitforkey
+
+	; set position, second subpixel
+	call	gfxoff
+	mov	r0,#vdc_spr0_ctrl
+	mov	a,r4
+	movx	@r0,a
+	inc	r0
+	inc	r3
+	mov	a,r3
+	movx	@r0,a
+	inc	r0
+	mov	a,#col_spr_red
+	movx	@r0,a
+	mov	r0,#vdc_collision
+	mov	a,#vdc_coll_char
+	movx	@r0,a
+	call	gfxon
+	call	waitvsync
+	mov	r0,#iram_collision
+	mov	a,@r0
+	anl	a,#001h
+	anl	a,r6			; only set when both pixels are set
+	mov	r6,a
+
+	;;call	gfxoff
+	;;mov	r0,#iram_collision
+	;;mov	a,@r0
+	;;mov	r0,#vdc_gridh0
+	;;movx	@r0,a
+	;;call	gfxon
+	;;call	waitforkey
+
+	; combine with other bits
+	mov	a,r7
+	rl	a
+	orl	a,r6
+	mov	r7,a
+	mov	a,r3
+	xrl	a,#027h			; max x
+	jz	nextlin			; next line
+	jmp	loop2
+
+nextlin	; start new line
+	mov	a,r7
+	mov	@r1,a
+	inc	r1
+	inc	r4
+	inc	r4
+	mov	a,r4
+	xrl	a,#02eh
+	jz	finished
+	jmp	loop1
+
+finished
+	; now print results, first 5 as chars
+	call	gfxoff
+	mov	r1,#iram_bitmap
+	mov	r0,#vdc_char1
+	mov	r3,#010h
+	mov	r4,#040h
+	mov	r6,#col_chr_white
+loop3
+	mov	a,@r1
+	call	displayhex
+	inc	r1
+	mov	a,r3
+	add	a,#8
+	mov	r3,a
+	mov	a,r1
+	xrl	a,#iram_bitmap+5
+	jnz	loop3
+
+	; print spaces in q0/1
+	mov	r0,#vdc_quad0
+	mov	r3,#010h
+	mov	r4,#060h
+	mov	r2,#8
+loop4
+	mov	r6,#col_chr_white
+	mov	r5,#00ch
+	call	printchar
+	djnz	r2,loop4
+
+	; last 2 in quad0/1
+	mov	r0,#vdc_quad0
+	mov	r3,#010h
+	mov	r4,#060h
+	mov	r6,#col_chr_white
+	mov	a,@r1
+	swap	a
+	anl	a,#0fh
+	call	displayhexnibble
+	mov	a,@r1
+	anl	a,#0fh
+	mov	r0,#vdc_quad1
+	call	displayhexnibble
+
+	inc	r1
+	mov	r0,#vdc_quad1+4
+	mov	a,@r1
+	swap	a
+	anl	a,#0fh
+	call	displayhexnibble
+	mov	a,@r1
+	anl	a,#0fh
+	mov	r0,#vdc_quad0+8
+	call	displayhexnibble
+
+	call	gfxon
+	jmp	keyloop
+
+	align	256
+
+keyloop	call	waitforkey
+	jz	.key0
+	dec	a
+	jz	.key1
+	jmp	keyloop
+
+.key0	mov	r0,#iram_char
+	mov	a,@r0
+	dec	a
+	mov	@r0,a
+	jmp	newchar
+
+.key1	mov	r0,#iram_char
+	mov	a,@r0
+	inc	a
+	mov	@r0,a
+	jmp	newchar
+
+	align 256
+
+displayhex
+; r0=charpointer r3=x, r4=y, r6=color a=number
+; alters r7
+	mov	r7,a
+	swap	a
+	anl	a,#00fh
+	call	displayhexnibble
+	mov	a,r7
+	anl	a,#00fh
+	call	displayhexnibble
+	ret
+
+displayhexnibble
+; r0=charpointer r3=x, r4=y, r6=color, a=number
+; alters r3, r5, a
+	add	a,#hextable & 0ffh
+	movp	a,@a
+	mov	r5,a
+	call	printchar
+	ret
+
+hextable
+	db	0,1,2,3,4,5,6,7,8,9,020h,025h,023h,01ah,012h,01bh

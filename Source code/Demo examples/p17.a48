@@ -1,0 +1,96 @@
+; Print "HELLO WORLD" and play with P17.
+
+; Version 1.0
+
+; $Id: p17.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; This program simply prints "HELLO WORLD" on the screen. Additionally you
+; can clear and set P17 by pressing 0 and 1.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is ugly, badly commented, unsupported code!
+
+	cpu	8048
+
+	org	400h
+	
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	call	gfxoff
+	mov	r0,#vdc_char0
+	mov	r3,#20h		; x-position
+	mov	r4,#20h		; y-position
+	mov	r2,#0bh		; length
+	mov	r1,#hellostr & 0ffh	; the string to print, must be in the same page
+loop	mov	a,r1		; get pointer
+	movp	a,@a		; get char
+	mov	r5,a		; into the right register
+	inc	r1		; advance pointer
+	mov	r6,#col_chr_white
+	call	printchar	; print it
+	djnz	r2,loop		; do it again
+
+	; add some grid
+	mov	r0,#vdc_gridv0
+	mov	a,#001h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	mov	r0,#vdc_gridh0
+	mov	a,#003h
+	movx	@r0,a
+
+	; set background and grid color
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black | col_grd_yellow
+	movx	@r0,a
+	call	gfxon		; lets see what is written
+
+.loop	call	waitforkey
+	jz	.clear
+	dec	a
+	jz	.set
+	jmp	.loop
+
+.clear	anl	P1,#07fh
+	jmp	.loop
+
+.set	orl	P1,#080h
+	jmp	.loop
+	
+hellostr	db	1dh, 12h, 0eh, 0eh, 17h, 0ch, 11h, 17h, 13h, 0eh, 1ah

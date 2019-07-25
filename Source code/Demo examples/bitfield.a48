@@ -1,0 +1,278 @@
+; bitfield.a48
+; Version 1.1
+;
+; History:
+; Version 1.1
+;   Removed unnecessary call vdcenable at beginning.
+;
+; Version 1.0
+;   first release
+;
+; This program shows how to use the bitfield routines, how to wait for
+; pressed keys on the keyboard and how to use VSYNC and line interrupts.
+; You can change single bits in the horizontal grid. Use "+" to edit
+; next bit, "-" to edit previous bit, "1" to set bit, "0" to clear bit.
+
+; Copyright (C) 1997-1999 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+; variables in internal ram
+
+iram_work	equ	020h
+iram_value	equ	021h
+iram_ictrl	equ	022h	; control irq
+iram_vdcctrl	equ	023h	; control value from VDC
+
+ictrl_blink	equ	080h	; if set, do the blinking
+ictrl_lineirq	equ	040h	; if set, do the lineirq
+
+	org	400h
+	
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timeirq		; timer
+	jmp	myvsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+start
+	call	gfxoff
+
+	; initialise variables
+	mov	a,#025h		; the bit in the middle
+	mov	r0,#iram_work
+	mov	@r0,a
+	mov	a,#1		; middle bit is set
+	mov	r0,#iram_value
+	mov	@r0,a
+	mov	r0,#iram_ictrl
+	mov	a,#0		; don't blink yet
+	mov	@r0,a
+
+	; set grid
+	mov	r0,#vdc_gridh0
+	mov	r1,#gridh & 0ffh
+	mov	r2,#9
+loopgh
+	mov	a,r1		; source
+	movp	a,@a		; get value
+	movx	@r0,a		; store in vdc
+	inc	r0
+	inc	r1
+	djnz	r2,loopgh
+
+	call	gfxon
+
+	; activate blinking and line irq
+	mov	r0,#iram_ictrl
+	mov	a,#ictrl_blink | ictrl_lineirq
+	mov	@r0,a
+
+main	; begin of main loop
+	call	waitforkey	; let user press a key
+	mov	r7,a		; store it for later
+
+	mov	r0,#iram_work
+	mov	a,@r0		; get active bit
+	mov	r6,a		; new bit, if any
+	mov	r5,a		; old bit
+
+	mov	a,r7
+	xrl	a,#010h		; "+" key
+	jnz	noplus
+	inc	r6
+noplus
+	mov	a,r7
+	xrl	a,#028h		; "-" key
+	jnz	nominus
+	dec	r6
+nominus
+
+	; test, if bit changed
+	mov	a,r5
+	xrl	a,r6
+	jz	nonewbit	; not changed
+
+	; the user wants a new bit
+	; we play with the same registers as out irq
+	; so disable irq while changing bits
+	; we need access to VDC, gfxoff re-enables irq
+	; so turn gfx off before the irq
+	call	gfxoff
+	dis	i
+	; set new bit active, r0==iram_work
+	mov	a,r6
+	mov	@r0,a
+	; set old bit to value
+	mov	r1,#vdc_gridh8+1
+	mov	r0,#iram_value
+	mov	a,@r0
+	jnz	setoldbit
+	mov	a,r5
+	call	bitclear
+	jmp	nooldbit
+setoldbit
+	mov	a,r5
+	call	bitset
+nooldbit
+
+	; set value to new bit
+	mov	r1,#vdc_gridh8+1
+	mov	a,r6
+	call	bittest
+	mov	r0,#iram_value
+	mov	@r0,a
+
+	en	i
+	call	gfxon		; outside of dis/en i
+nonewbit
+
+	; now test for "0" and "1"
+	; the key which is pressed is still in r7
+	mov	r0,#iram_value
+	mov	a,r7
+	xrl	a,#0		; "0"
+	jnz	nozero
+	mov	@r0,a		; a == 0, because jnz
+nozero
+
+	mov	a,r7
+	xrl	a,#1		; "1"
+	jnz	noone
+	cpl	a		; a == 0, because jnz
+	mov	@r0,a
+noone
+
+	jmp	main
+
+	; the default grid
+
+gridh:	db	001h, 082h, 044h, 028h, 010h, 028h, 044h, 082h, 001h
+
+	; my own vsync irq routine
+	; it starts the lineirq and does the blinking
+myvsyncirq
+	; start lineirq, if needed
+	mov	r0,#iram_ictrl	; control register
+	mov	a,@r0
+	cpl	a
+	jb6	myvsyncnoline	; should we start line irq ?
+	mov	a,@r0
+	mov	a,#088h		; middle of the screen
+	mov	t,a		; set # of lines to wait
+	strt	cnt		; start line counting
+	en	tcnti		; enable timer irq
+myvsyncnoline
+
+	; set grid+background color
+	mov	r0,#vdc_color
+	mov	a,#col_grd_white | col_grd_lum
+	movx	@r0,a
+
+	; do the blinking
+	mov	r0,#iram_ictrl	; control register
+	mov	a,@r0
+	jb7	myvsynccont	; should we blink ?
+	jmp	vsyncirq	; thats all for now
+
+myvsynccont
+	mov	a,@r0		; count the frames
+	inc	a
+	mov	@r0,a
+
+	anl	a,#03fh		; mask out framecounter
+	xrl	a,#00ah		; wait more frames ?
+	jz	myvsyncblink
+	jmp	vsyncirq	; thats all for now
+
+myvsyncblink
+	mov	a,@r0
+	anl	a,#0c0h		; restart frame counter
+	mov	@r0,a
+
+	; turn grid gfx off, the bios-routine is not safe
+	; to use in irq, it leaves with RB1 and EN I
+	mov	r1,#iram_vdcctrl
+	mov	r0,#vdc_control
+	movx	a,@r0
+	mov	@r1,a		; store old vdc_control
+	anl	a,#0f6h
+	movx	@r0,a
+
+	mov	r0,#iram_work	; get the bit to blink
+
+	mov	r1,#vdc_gridh8+1
+	mov	a,@r0
+	call	bittest		; test bit to blink
+	movx	a,@r1		; invert the bit we have
+	xrl	a,r2
+	movx	@r1,a
+
+	; restore old VDC status
+	mov	r1,#iram_vdcctrl
+	mov	r0,#vdc_control
+	mov	a,@r1
+	movx	@r0,a
+
+	jmp	vsyncirq	; continue vsyncirq
+
+timeirq:
+	sel	rb0
+	mov	r5,a
+	stop	tcnt
+
+	in	a,P1
+	mov	r6,a
+	call	vdcenable
+
+	; set grid+background color
+	mov	r0,#vdc_color
+	mov	a,#col_grd_yellow | col_grd_lum | col_bck_blue
+
+	; wait until end of current scan line to avoid changing
+	; the background in the middle of the screen
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	movx	@r0,a
+
+	mov	a,r6
+	outl	P1,a
+
+	mov	a,r5
+	retr
+
+	end

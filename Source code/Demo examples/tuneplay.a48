@@ -1,0 +1,112 @@
+; Play custom sound tunes
+
+; Version 1.0
+
+; $Id: tuneplay.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; Press any key to hear the tune play, there is no visible output.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+	org	400h
+
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	mysoundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start	section main
+	; wait silently until key pressed
+	call	waitvsync
+	call	readkey
+	jb7	start
+	; play tune
+	mov	a,#076h
+	call	playsound
+	; repeat
+	jmp	start
+	endsection main
+
+	org	0700h
+
+mysoundirq
+	; check if BIOS sound or custom sound
+	mov	a,r4
+	add	a,#08ah		; >= 076h
+	jc	.custom
+	jmp	soundirq	; BIOS tune
+
+.custom	; custom sound handler, read sound opcodes from current page
+	mov	a,r4
+	movp	a,@a
+	mov	r1,a		; command byte
+	inc	r4
+	xrl	a,#0fh
+	jz	.op0f		; test for new opcode
+	mov	a,r4
+	movp	a,@a
+	mov	r2,a		; parameter byte
+	jmp	parsesnd	; let BIOS sound IRQ handle opcode
+
+	; opcode 0F: sound off, copy next 3 bytes into A7/8/9
+.op0f	mov	r0,#vdc_soundctrl
+	clr	a
+	movx	@r0,a		; old sound off
+	mov	r0,#vdc_sound0
+	mov	r1,#3		; number of bytes to copy
+.loop	mov	a,r4
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r4
+	djnz	r1,.loop
+	jmp	mysoundirq	; restart sound handler
+
+	org	0776h
+
+; tune for level win on KTAA
+	db	081h, 000h
+	db	082h, 004h
+	db	083h, 008h
+	db	084h, 00ch
+	db	085h, 010h
+	db	086h, 014h
+	db	087h, 018h
+	db	088h, 01ch
+	db	089h, 020h
+	db	08ah, 024h
+	db	021h, 0
+
+	end

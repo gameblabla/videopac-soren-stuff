@@ -1,0 +1,136 @@
+; Play the ROM sound tones
+
+; Version 1.0
+
+; $Id: tones.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; Press the keys 0-9 to hear all 10 tones included into the BIOS rom.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is ugly, badly commented, unsupported code!
+
+	cpu	8048
+
+	org	400h
+
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start	section main
+	call	waitforkey		; get key
+	; check if key is in valid range 0-9
+	mov	r7,a
+	add	a,#0f5h
+	jc	start			; out of range, wait again
+	; multiply key by 4 to get tone number
+	mov	a,r7
+	rl	a
+	rl	a
+	mov	r7,a
+	; print tone number
+	call	gfxoff
+	mov	a,r7
+	mov	r0,#vdc_char0
+	mov	r3,#20h			; x
+	mov	r4,#20h			; y
+	mov	r6,#col_chr_white
+	call	displayhex
+	call	gfxon
+
+	; wait until keyclick ends
+	mov	r0,#iram_irqctrl
+.click	mov	a,@r0
+	jb6	.click
+
+	; play selected tone
+	mov	a,r7
+	call	playtone
+
+	jmp	start
+	endsection main
+
+; play a ROM tone
+playtone section playtone
+; Input:
+;  A tone to play, 0-024h, in steps of 4
+; Changes:
+;  R0 R1 R2 A
+	; old sound off
+	mov	r2,a			; pointer to tone in page3
+	mov	r0,#vdc_soundctrl
+	clr	a
+	movx	@r0,a
+	; copy tone
+	mov	r0,#vdc_sound0		; start of sound registers
+	mov	r1,#4			; 4 bytes to copy
+.loop	mov	a,r2
+	movp3	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r2
+	djnz	r1,.loop
+	ret
+	endsection playtone
+
+	align	256
+
+; Display a hex value
+displayhex section displayhex
+; Input:
+;  A  number to print
+;  R0 pointer to char
+;  R3 X
+;  R4 Y
+;  R6 color
+; Output:
+;  R0 pointer to char+2
+;  R3 X+16
+; Changes:
+;  A R5 R7
+	mov	r7,a
+	swap	a
+	anl	a,#00fh
+	call	.nibble
+	mov	a,r7
+	anl	a,#00fh
+.nibble add	a,#hextab & 0ffh
+	movp	a,@a
+	mov	r5,a
+	call	printchar
+	ret
+
+hextab	db	0,1,2,3,4,5,6,7,8,9,020h,025h,023h,01ah,012h,01bh
+	endsection displayhex

@@ -1,0 +1,293 @@
+; collision demonstration for the G7000 by Soeren Gust
+; Version 1.3
+
+; $Id: collision.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.3
+;   The hextable was wrong, D and E were swapped.
+;
+; Version 1.2
+;   Removed unnecessary call vdcenable at beginning.
+;
+; Version 1.1
+;   moved display of collision register, now visible on o2em
+;
+; Version 1.0
+;   first release
+;
+; This program demonstrates how to check for collisions and how to play one
+; of the builtin sound tunes.
+
+; Copyright (C) 1997-2002 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+; some variables in internal ram
+
+iram_xl		equ	020h		; bit 0-7 of x position
+iram_xh		equ	021h		; bit 8 of y position
+iram_y		equ	022h		; y position
+iram_colctrl	equ	023h		; color/control
+
+	org	400h
+	
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	call	gfxoff
+
+	; initialise sprite shapes
+	mov	r0,#vdc_spr0_shape
+	mov	r1,#spriteball & 0ffh
+	call	setshape
+
+	mov	r0,#vdc_spr1_shape
+	mov	r1,#spritetriangle & 0ffh
+	call	setshape
+
+	; set sprite position for triangle
+	mov	r0,#vdc_spr1_ctrl
+	mov	a,#01Ch		; y position
+	movx	@r0,a
+	inc	r0
+	mov	a,#01Ch		; x position
+	movx	@r0,a
+	inc	r0
+	mov	a,#col_spr_red
+	movx	@r0,a
+
+	; set colors
+	mov	r0,#vdc_color
+	mov	a,#col_grd_blue
+	movx	@r0,a
+
+	; set grid
+	mov	r0,#vdc_gridv1
+	mov	a,#001h
+	movx	@r0,a
+
+	mov	r0,#vdc_gridh0
+	mov	a,#002h
+	movx	@r0,a
+
+	mov	r0,#vdc_gridh1
+	mov	a,#002h
+	movx	@r0,a
+
+	; set char
+	mov	r0,#vdc_char2
+	mov	r3,#00Eh	; x position
+	mov	r4,#01Fh	; y position
+	mov	r5,#03Ch	; ship1
+	mov	r6,#col_chr_green
+	call	printchar
+
+	call	gfxon		; turn gfx on
+
+	; initialise internal variables
+	mov	r0,#iram_xl
+	mov	a,#02Ah
+	mov	@r0,a
+	mov	r0,#iram_xh
+	mov	a,#0
+	mov	@r0,a
+	mov	r0,#iram_y
+	mov	a,#038h
+	mov	@r0,a
+	mov	r0,#iram_colctrl
+	mov	a,#col_spr_white
+	mov	@r0,a
+
+loop
+	call	waitvsync	; wait for begin of frame
+
+	call	vdcenable	; enable vdc
+
+	; tell the vdc to look for collisions with sprite 0
+	; in the next frame
+	mov	r0,#vdc_collision
+	mov	a,#vdc_coll_spr0
+	movx	@r0,a		; activate collision checks
+
+	; display the contents of the collision register on
+	; the right side. this information reflects the
+	; situation of the last frame.
+	call	gfxoff
+	mov	r0,#iram_collision
+	mov	a,@r0
+	mov	r0,#vdc_char0
+	mov	r3,#040h	; x position
+	mov	r4,#01Eh	; y position
+	mov	r6,#col_chr_white
+	call	displayhex
+	call	gfxon
+
+	mov	r1,#0		; joystick 0
+	call	getjoystick	; get offsets
+
+	cpl	F0
+	jf0	nofire		; skip next part
+				; if not fire
+
+	; start playing the builtin tune for "explode" 
+	; the rest is done by the irq routines in rom
+	mov	a,#tune_explode
+	call	playsound
+
+nofire
+	call	extramenable	; enable extram
+	mov	r0,#07fh	; start of table
+
+setpos
+	; adjust sprite positions in iram
+	; y is simple
+	mov	r1,#iram_y	; y position
+	mov	a,@r1		; get it
+	add	a,r3		; add offset
+	mov	@r1,a		; store y postion
+
+	; x is a 9 bit add using carry, we need to expand r2 to 9 bit also
+	mov	r1,#iram_xl	; low byte of x
+	mov	a,@r1		; get it
+	add	a,r2		; add offset, sets carry if necessary
+	mov	@r1,a		; store low byte of x
+	mov	r1,#iram_xh	; high bit of x
+	mov	a,@r1		; get it
+	addc	a,#0		; add the carry
+	mov	r7,a		; we need this later
+	mov	a,r2		; get offset
+	rr	a		; reuse bit 1 of offset as bit 8
+				; we need it, because we are dealing with
+				; 2s complement if R2=-1=01ffh
+	add	a,r7		; add result from above to bit 8 of offset
+	anl	a,#001h		; we only need 1 bit
+	mov	@r1,a		; store it as high bit
+
+	; prepare table for sprite positions
+	mov	a,#3		; copy 3 bytes
+	movx	@r0,a
+	dec	r0
+	mov	a,#vdc_spr0_ctrl
+	movx	@r0,a
+	dec	r0
+
+	; set sprite positions from iram using table
+	mov	r1,#iram_y	; y position
+	mov	a,@r1		; get it
+	movx	@r0,a		; put it into table
+	dec	r0
+
+	; x position: recombine xh and xl and split it into 8-1/0
+	mov	r1,#iram_xh	; highest bit of x position
+	mov	a,@r1
+	rrc	a		; highest bit of sprite_x into carry
+	mov	r1,#iram_xl	; low byte of x positon
+	mov	a,@r1
+	rrc	a		; lowest bit into carry, highest bit into 7
+	movx	@r0,a		; put bit 8-1 of sprite_x into sprite control 1
+	dec	r0
+	mov	a,#0		; we only need carry (lowest bit of sprite_x)
+	rlc	a		; lowest bit of sprite_x into bit 0
+	mov	r7,a		; store in r7
+	mov	r1,#iram_colctrl; color/control
+	mov	a,@r1		; get it
+	orl	a,r7		; put it together
+	movx	@r0,a		; put it into sprite control 2 via table
+	dec	r0
+
+	call	tableend	; thats all
+
+	jmp	loop
+
+
+; start a new page, only to make sure that shapes and the code which
+; accesses them are in one page, same for displayhex and hextable
+
+	align	256
+
+	; the shapes of the sprites
+	; the images are mirrored on the y axis
+spriteball:
+	db	00111100b
+	db	01111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111110b
+	db	00111100b
+
+spritetriangle:
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+
+setshape
+; r0=spritepointer, r1=pointer to image in rom
+	mov	r7,#8		; 8 bytes
+copyspriteloop:
+	mov	a,r1
+	movp	a,@a		; get byte
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	djnz	r7,copyspriteloop
+
+	ret
+
+displayhex
+; r0=charpointer r3=x, r4=y, r6=color a=number
+; alters r7
+	mov	r7,a
+	swap	a
+	anl	a,#00fh
+	call	displayhexnibble
+	mov	a,r7
+	anl	a,#00fh
+	call	displayhexnibble
+	ret
+
+displayhexnibble
+; r0=charpointer r3=x, r4=y, r6=color, a=number
+; alters r3, r5, a
+	add	a,#hextable & 0ffh
+	movp	a,@a
+	mov	r5,a
+	call	printchar
+	ret
+
+hextable:
+	db	0,1,2,3,4,5,6,7,8,9,020h,025h,023h,01ah,012h,01bh
+
+	end

@@ -1,0 +1,55 @@
+This is the source code to KTAA, a video console game for the Odyssey^2,
+Videopac G7000 and Videopac+ G7400 game consoles. It uses all 4 banks with 3K
+code in every bank, all the address space that is available without additional
+address decoding.
+
+This is only useful for experienced Videopac programmers.
+
+I wrote KTAA using asl version 1.41r8, see <http://www.alfsembler.de>. I use
+several special features (macros, section) of asl, so using other assemblers
+requires a lot of porting. To rebuild the graphic include files you need perl,
+I used version 5.6.1.
+
+The code is not as good documented as my normal example code. I inserted
+some explanations where I thought they were necessary, see the comments
+containing "NOTE:", but they were mostly written to help me re-understand
+my own code.
+
+Code execution starts in bank 3 for non-plus machines and in bank 1 for
+Videopac+ G7400 machines. The file ktaa_b3.a48 contains additional information
+about the program structure.
+
+There are lots of data structures describing the levels, targets and alien
+combinations, they are distributed between several banks. If you change one of
+them others have to be adapted to reflect the changes done into the first one.
+Designing other levels is not an easy task.
+
+There are some assemble-time defines to enable cheat modes:
+
+CHEAT_LEVEL 	Press the keys 1-7 on the level screen to set the next level.
+CHEAT_TARGETS	The game continues even if all targets are shot by the aliens.
+CHEAT_SHIELD	The shield always has full power.
+
+There are several parameters which can be changed in common.h, some of them
+affect the timing, be careful when changing them, the whole timing is quite
+fragile.
+
+There are also some DEBUG_ defines I used while debugging. Not all of them
+lead to working code due to page misalignments.
+
+KTAA is Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 2 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 675 Mass
+Ave, Cambridge, MA 02139, USA.
+
+Soeren Gust

@@ -1,0 +1,2759 @@
+; Kill the attacking aliens for the G7000 / G7400 by Soeren Gust
+;
+; $Id: ktaa_b2.a48,v 1.125 2003/11/27 21:09:39 sgust Exp $
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is written for asl 1.41r8, see <http://www.alfsembler.de>. I use several
+; special features (macros, section) of asl, so using other assemblers
+; requires a lot of porting.
+
+	cpu	8048
+	page	0		; no page breaks in listings
+	macexp	off		; no macro expansions in listings
+	listing	noskipped	; only show active bank in listing
+
+BANK	equ	2		; current bank, needed for bankswitch macros
+
+	include	"g7000.h"
+	include	"charset.h"	; character set definition for g7000 chars
+	include	"bitfuncs.inc"	; part of asl distribution, see scoretext
+	include "common.h"	; variables, macros, defines
+	include "ktaa_b0.inc"	; tune definitions
+
+; here starts bank2 MB0 ------------------------------------------------------
+
+	org	0400h			; bank2/mb0
+
+	jmp	plusselectgame		; RESET, no selectgame
+	jmp	irq			; interrupt
+	jmp	lineirqentry		; timer: line irq
+	jmp	vsyncirq		; VSYNC-interrupt
+	jmp	selectgame		; after selectgame, unused in this bank
+	jmp	mysoundirqentry		; custom tune player
+
+	db	"OPNB"			; marker for o2em means PIN B open
+
+; IRQ entry after bankswitching
+; There is no extra code inserted into the IRQs in this bank.
+; Some routines are called from inside the gameloop, but VSYNC is already
+; finished and the routines are finished before the lineirq is triggered.
+; To simplify bankswitching I leave dummy code here, see banks 0 and 3 for real.
+
+myvsyncirqentry
+	retr
+	retr
+	retr
+	retr
+
+lineirqentry
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+
+; The tune player may be used in this bank, switch to bank 0 for playing
+mysoundirqentry
+	anl	P1,#0fch		; switch to bank 0
+	nop				; there is a jump here in bank 0
+	nop
+
+	include	"switchmb0.h"		; bank switch table for mb0
+
+	org	0460h
+
+;## respawn aliens, only at frames 5/6/7 of 8
+; NOTE:
+; This basically calls two types of helper routines. The spawn_ routines
+; decide which alien will be the next alien to respawn and when this will
+; happen in the slot. The new_ routines then set the initial position and
+; speed of the alien after the respawn wait is over.
+respawn section respawn
+	; find which alien
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#7
+	xrl	a,#4			; invert bit 2
+	jnz	.cont			; skip on frame 4
+.ret	jmp	switchmb0_3
+.cont 	jb2	.ret			; skip on frames 0-3
+	; get pointer to alien
+	dec	a
+	mov	r0,a
+	rl	a			; *2
+	add	a,r0			; *3
+	add	a,#iram_alien0_t
+	mov	r0,a			; iram_alien?_t
+	mov	a,@r0			; get type
+	anl	a,#0fch			; remove frame info
+	jnz	.ret			; skip empty alien
+
+; NOTE:
+; This routine is complicated: When respawn=0 it decides which alien is next.
+; If respawn!=0 it waits until respawn is 0 again by counting up, then it
+; spawns the already recorded alien.
+.empty	; empty alien found, now check respawn counters
+	movx	a,@r0		; eram_alien?_v as respawn counter
+	jnz	.count		; still counting
+	; need decision which alien is next, dispatch spawn_ routine by level
+	mov	r1,#iram_level
+	mov	a,@r1
+	add	a,#lo(.spawntable)
+	call	.spcal		; allow ret in spawn_ routines
+	jmp	switchmb0_3	; spawn decision done, finished
+.spcal	jmpp	@a		; continue in spawn_ routine
+.count	inc	a		; advance respawn counter
+	movx	@r0,a		; store new counter
+	jz	.spawn		; spawn if counter has run out
+	jmp	switchmb0_3 	; wait more until spawn
+.spawn	; spawn now, data already recorded
+	inc	r0
+	movx	a,@r0		; eram_alien0_a contains type of alien
+	dec	r0
+	mov	r2,a		; store type
+	rl	a
+	rl	a
+	mov	@r0,a		; iram_alien?_t
+	; initialise new alien parameters, dispatch new_ routine by alien type
+	mov	a,r2		; get type
+	add	a,#lo(.newtab-1)
+	call	.newcal		; to allow ret in new_ routine
+	jmp	switchmb0_3	; new alien initialised, finished
+.newcal	jmpp	@a		; continue in new_ routine
+
+; dispatch table for new_, alien parameter init
+.newtab
+	db	lo(.toufo)
+	db	lo(.todisc)
+	db	lo(.tobomb)
+	db	lo(.torand)
+	db	lo(.toatck)
+	db	lo(.toboom)
+
+.toufo	jmp	new_ufo
+.todisc	jmp	new_disc
+.tobomb	jmp	new_bomb
+.torand	jmp	new_random
+.toatck	jmp	new_attack
+.toboom	jmp	new_boom
+
+	assert	"hi(.newcal) == hi($)"
+
+; dispatch table for spawn_, decide which type of alien is next
+.spawntable
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+	db	lo(.to4)
+	db	lo(.to5)
+	db	lo(.to6)
+	db	lo(.to7)
+
+.to1	jmp	spawn_1
+.to2	jmp	spawn_2
+.to3	jmp	spawn_3
+.to4	jmp	spawn_4
+.to5	jmp	spawn_5
+.to6	jmp	spawn_6
+.to7	jmp	spawn_7
+
+	assert	"hi(.spcal) == hi($)"
+
+	endsection respawn
+
+; for all spawn_ routines:
+; Input
+;  R0 iram_alien?_t
+
+spawn_justufos section spawn_justufos
+	mov	r2,#lo(table_justufos)
+	jmp	tablespawn		; short form of call+ret
+	endsection spawn_justufos
+
+; Just a lot of discs
+spawn_justdiscs section spawn_justdiscs
+	mov	r2,#lo(table_justdiscs)
+	jmp	tablespawn		; short form of call+ret
+	endsection spawn_justdiscs
+
+; Ufos and discs plus some bombers
+spawn_ufodiscs section spawn_ufodiscs
+	mov	r3,#ALN_BOMBER
+	call	checkalien
+	jnz	.nobomb
+	; spawn with bomber alien
+	mov	r2,#lo(table_ufodiscsbomb)
+	jmp	tablespawn		; short form of call+ret
+.nobomb	; spawn without bomber alien
+	mov	r2,#lo(table_ufodiscs)
+	jmp	tablespawn		; short form of call+ret
+	endsection spawn_ufodiscs
+
+; Introducing boomerang alien, max. one at every time, no bombers
+spawn_introboom section spawn_introboom
+	; check if there is already a boomerang alien
+	mov	r3,#ALN_BOOMERANG
+	call	checkalien
+	jnz	.noboom
+	; spawn with boomerang alien
+	mov	r2,#lo(table_introboom2)
+	jmp	tablespawn		; short form of call+ret
+.noboom	; spawn without boomerang alien
+	mov	r2,#lo(table_introboom1)
+	jmp	tablespawn		; short form of call+ret
+	endsection spawn_introboom
+
+	org	04f3h			; ALIGNMENT
+
+; Introducing random aliens, max. one at every time, plus additional bombers
+spawn_introrand section level_introrand
+	; check for ALN_BOMBER
+	mov	r4,#00ah		; probability for bomber
+	mov	r3,#ALN_BOMBER		; type of alien
+	call	probspawn
+	jnz	.nobomb			; decided against ALN_BOMBER
+	ret				; probspawn has spawned
+.nobomb	; check if there is already a random alien
+	mov	r3,#ALN_RANDOM
+	call	checkalien
+	jnz	.norand
+	; spawn with random alien
+	mov	r2,#lo(table_introrand2)
+	jmp	tablespawn		; short form of call+ret
+.norand	; spawn without random alien
+	mov	r2,#lo(table_introrand1)
+	jmp	tablespawn		; short form of call+ret
+	endsection level_introrand
+
+; Always one boomerang alien, fill in rest with random and disc
+spawn_difficult section level_difficult
+	; check for boomerang alien
+	mov	r3,#ALN_BOOMERANG
+	call	checkalien
+	jnz	.noboom
+	; spawn only boomerang alien
+	mov	r2,#lo(table_onlyboom)
+	jmp	tablespawn		; short form of call+ret
+.noboom	; spawn only normal aliens
+	mov	r2,#lo(table_difficult)
+	jmp	tablespawn		; short form of call+ret
+	endsection level_difficult
+
+; Attack alien, always one, fill up with ufo/disc plus bombers
+spawn_introattack section level_introattack
+	; check for ALN_BOMBER
+	mov	r4,#00ah		; probability for bomber
+	mov	r3,#ALN_BOMBER		; type of alien
+	call	probspawn
+	jnz	.nobomb			; decided against ALN_BOMBER
+	ret				; probspawn has spawned
+.nobomb	; normal spawning
+	mov	r3,#ALN_ATTACK
+	call	checkalien
+	jnz	.rand
+	; spawn attack alien
+	mov	r2,#lo(table_onlyattack)
+	jmp	tablespawn		; short form of call+ret
+.rand	; spawn random alien
+	mov	r2,#lo(table_introattack)
+	jmp	tablespawn		; short form of call+ret
+	endsection level_introattack
+
+; FSM for joystick fire handling, called once per frame
+waitfire section waitfire
+; Input at first call:
+;   eram_joystate=0
+;   eram_joywait=time until auto continue, 0 disable auto cont
+; Output:
+;   A=0 still waiting
+;   A=1 fire pressed or timeout
+; Trashed:
+;   R0
+; NOTE:
+; For the first debounce I use the eram_frame variable, the later debounces
+; use eram_joywait, the auto continue time is already over.
+	mov	r1,#0			; first joystick
+	call	getjoystick		; safe to call here, no P17 tricks
+	mov	r0,#eram_joystate
+	movx	a,@r0
+	add	a,#lo(.statetable)
+	; I don't test for legal values here, if the state is somehow
+	; bigger than 6 bad things will happen.
+	jmpp	@a
+
+.statetable
+	db	lo(.start)	; waiting for fire released
+	db	lo(.wait1)	; fire released, wait for debounce
+	db	lo(.wait2)	; waiting for FIRE
+	db	lo(.fire1)	; fire pressed, wait some frames to debounce
+	db	lo(.fire2)	; waiting for fire release
+	db	lo(.up)		; fire release, wait some frames to debounce
+	db	lo(.end)	; finished
+
+; wait until fire button released
+.start	jf0	.next
+	mov	a,#JOYSTATE_WAIT1
+	movx	@r0,a			; new state
+	inc	r0
+	inc	r0			; eram_frame
+	mov	a,#2			; debounce wait
+	movx	@r0,a
+	jmp	.next
+
+; button released, debounce
+.wait1	inc	r0
+	inc	r0			; eram_frame
+	movx	a,@r0
+	jz	.tow2
+	dec	a
+	movx	@r0,a
+	jmp	.next
+
+.tow2	mov	a,#50
+	movx	@r0,a			; eram_frame used as prescaler
+	dec	r0
+	dec	r0
+	mov	a,#JOYSTATE_WAIT2
+	movx	@r0,a			; eram_joystate
+	jmp	.next
+
+; waiting for fire button down or joywait
+.wait2	jf0	.tof1			; button pressed, go to JOYSTATE_FIRE1
+	; prescale using eram_frame
+	inc	r0
+	inc	r0
+	movx	a,@r0			; eram_frame
+	dec	a
+	movx	@r0,a
+	jnz	.next
+	mov	a,#50			; restart prescaler
+	movx	@r0,a
+	; now count framecount
+	dec	r0
+	movx	a,@r0			; check wait framecount
+	jz	.next
+	inc	a			; count frames
+	movx	@r0,a			; store new framecount
+	jnz	.next			; time not reached yet
+
+	jmp	.toend			; timed out
+
+.tof1	mov	a,#JOYSTATE_FIRE1
+	movx	@r0,a			; new state
+	inc	r0
+	mov	a,#2			; debounce wait
+	movx	@r0,a
+	; play keyclick sound
+	mov	a,#tune_keyclick
+	call	playsound
+	jmp	.next
+
+; fire down, debouncing
+.fire1	inc	r0
+	movx	a,@r0
+	jz	.tof2			; debounced
+	dec	a
+	movx	@r0,a
+	jmp	.next
+
+.tof2	mov	a,#JOYSTATE_FIRE2
+	dec	r0
+	movx	@r0,a
+	jmp	.next
+
+; fire down, wait for release
+.fire2	jf0	.next
+	mov	a,#JOYSTATE_UP
+	movx	@r0,a			; new state
+	inc	r0
+	mov	a,#2			; debounce wait
+	movx	@r0,a
+	jmp	.next
+
+; fire released, debouncing
+.up	inc	r0
+	movx	a,@r0
+	jz	.toend
+	dec	a
+	movx	@r0,a
+	jmp	.next
+
+; everything finished
+.toend	mov	a,#JOYSTATE_END
+	dec	r0
+	movx	@r0,a
+	; fall through to end
+.end	mov	a,#1			; end reached
+	ret
+
+; waitfire is not finished yet, call again next frame
+.next	clr	a
+	ret
+
+	assert "hi(.statetable) == hi($)"
+
+	endsection waitfire
+
+;** called from bank1
+waitfireb1 section waitfireb1
+	call	waitfire
+	jmp	switchmb0_1
+	endsection waitfireb1
+
+;FREE: 020h
+
+	org	05d0h
+
+; 16 bit lsfr, feedback 08016h
+; returns mirrored lowest 8 bits XOR highest 8 bits
+; the low byte is stored in mirrored format
+; Using the mirrored low byte gives much better results, at least they look
+; quite random in gnuplot when compared with the non mirrored version.
+; needs: extram
+; destroys: R1, R3
+getrandbyte section getrandbyte
+	mov	r1,#eram_randomh
+	movx	a,@r1
+	clr	c
+	rrc	a		; shift high byte
+	movx	@r1,a		; store new high byte
+	inc	r1
+	movx	a,@r1		; get low byte
+	rlc	a		; shift low byte, mirrored
+	jc	.xor		; check old bit 0
+	movx	@r1,a		; store byte
+	mov	r3,a		; remember low byte
+	dec	r1
+	movx	a,@r1		; get high byte
+	jmp	.combin
+
+.xor	xrl	a,#068h		; xor low byte (bitmirrored 16)
+	movx	@r1,a		; store low byte
+	mov	r3,a		; remember low byte
+	dec	r1
+	movx	a,@r1		; get high byte
+	xrl	a,#080h		; xor high byte
+	movx	@r1,a		; store high byte
+.combin xrl	a,r3		; combine with low byte
+	ret
+	endsection getrandbyte
+
+;** called from bank 1
+getrandbyteb1 section getrandbyteb1
+	call	getrandbyte
+	jmp	switchmb0_1
+	endsection getrandbyteb1
+
+;** called from bank 3
+getrandbyteb3 section getrandbyteb3
+	call	getrandbyte
+	jmp	switchmb0_3
+	endsection getrandbyteb3
+
+	org	0600h
+
+; Table based alien spawning, uses alienvar as counter.
+; This works by getting random entries from the table until a certain
+; probability level is reached. The number of tries is timing critical
+; on NTSC when there is nothing more to spawn. Only then the max number
+; of tries is run.
+tablespawn section tablespawn
+; Input
+;   R0 iram_alien?_t
+;   R2 pointer to spawning table
+; Usage, quite tricky due to subroutine trashes
+;   R1 pointer to current alien variable
+;   R3 pointer to spawn table entry
+;   R4 current number of alien to try
+;   R5 counter for tries
+;   R6 current probability, spawn current alien at overflow
+; Trash
+;   R0 iram_alien?_t may be overwritten
+	call	getrandbyte	; trashes R1 R3
+	mov	r6,a		; initial probability
+	mov	r5,#15		; run through this max 15 times
+.loop	; get alien number to try
+	call	getrandbyte	; trashes R1 R3
+	anl	a,#7
+	mov	r4,a		; store alien number to try, range 0-5
+	add	a,#0fah
+	jc	.loop		; number was 6-7, try new number
+	; pointer to table entry
+	mov	a,r4
+	rl	a		; *2
+	add	a,r2		; add start of table
+	mov	r3,a		; pointer to table entry
+	; pointer to alien variable
+	mov	a,r4		; alien number
+	add	a,#eram_alienvar
+	mov	r1,a		; alien var of entry
+	; test if still aliens left
+	movx	a,@r1
+	jz	.next		; no more aliens of this type
+	; check probability
+	mov	a,r3
+	movp	a,@a		; get probability from table
+	add	a,r6		; add probability
+	mov	r6,a		; store new probability
+	jc	.spawn		; probability overflow: spawn current alien
+.next	djnz	r5,.loop
+	; Nothing to spawn found, happens when no more aliens available,
+	; should only very seldom happen in normal play. If nothing spawns
+	; spawn_ will be called again next frame. In levels which mix
+	; probspawn and tablespawn this increases probspawn probability
+	; slightly.
+	ret
+.spawn	; spawn current alien
+	; decrement alien var
+	movx	a,@r1
+	dec	a
+	movx	@r1,a
+	; randomize spawn wait
+	inc	r3	; pointer to spawn table
+	mov	a,r3
+	movp	a,@a	; get max spawn wait from table
+	mov	r6,a
+	call	getrandbyte
+	mov	r3,a	; random value from 0-255
+	call	mult8	; preserves R4
+	mov	a,r1	; max spawn wait * random / 256 = random spawn wait
+	jnz	.stwait
+	mov	a,#1	; replace wait of 0 with 1
+.stwait	cpl	a	; spawn wait counts up, so store negated value
+	inc	a
+	movx	@r0,a	; store spawn wait
+	inc	r0
+	mov	a,r4	; alien number: 0-5
+	inc	a	; alien type: 1-6
+	movx	@r0,a	; eram_alien?_a
+	; reduce probspawn wait
+	mov	r0,#eram_probspawn
+	movx	a,@r0
+	jz	.ret
+	dec	a
+	movx	@r0,a
+.ret	ret
+	endsection tablespawn
+
+; alien spawning tables
+; first byte probability, second byte spawn wait
+table_justufos
+	db	0ffh, 15	; ALN_UFO
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_justdiscs
+	db	0, 0
+	db	0ffh, 10	; ALN_DISCS
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_ufodiscsbomb
+	db	020h, 15	; ALN_UFO
+	db	030h, 10	; ALN_DISC
+	db	006h, 5		; ALN_BOMBER
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_ufodiscs
+	db	020h, 15	; ALN_UFO
+	db	030h, 10	; ALN_DISC
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_introattack
+	db	030h, 10	; ALN_UFO
+	db	030h, 10	; ALN_DISC
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_introboom1
+	db	030h, 10	; ALN_UFO
+	db	030h, 10	; ALN_DISC
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_introboom2
+	db	010h, 10	; ALN_UFO
+	db	010h, 10	; ALN_DISC
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0ffh, 5		; ALN_BOOMERANG
+
+table_introrand1
+	db	030h, 10	; ALN_UFO
+	db	030h, 10	; ALN_DISC
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+
+table_introrand2
+	db	018h, 10	; ALN_UFO
+	db	018h, 10	; ALN_DISC
+	db	0, 0
+	db	0ffh, 5		; ALN_RANDOM
+	db	0, 0
+	db	0, 0
+
+table_difficult
+	db	0, 0
+	db	030h, 10	; ALN_DISC
+	db	0, 0
+	db	030h, 5		; ALN_RANDOM
+	db	0, 0
+	db	0, 0
+
+table_onlyboom
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0ffh, 5		; ALN_BOOMERANG
+
+table_onlyattack
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0, 0
+	db	0ffh, 5		; ALN_ATTACK
+	db	0, 0
+
+	assert "hi(tablespawn) == hi($)"
+
+; spawn a new alien by probability, but allow only one at the same time
+; this happens outside the normal alien counting rules
+probspawn section probabilityspawn
+; Input:
+;  R3 type of alien
+;  R4 probability value for spawning
+; Output:
+;  A=0  spawned
+;  A!=0 not spawned
+; Preserve:
+;  R0 iram_alien?_t to use for spawning
+	; check counter, prevents probspawn aliens when tablespawn is blocked
+	; by other rules and still aliens are left.
+	mov	r1,#eram_probspawn
+	movx	a,@r1
+	jnz	.negend
+	; only spawn if still others left
+	mov     r2,#6			; number of alien vars
+	mov     r1,#eram_alienvar
+.loop	movx    a,@r1
+	jnz     .tryit			; another alien found
+	inc     r1
+	djnz    r2,.loop
+	; no aliens left, nothing spawned
+.negend	mov     a,#0ffh
+        ret
+.tryit	; check if already another alien active
+	call	checkalien
+	xrl	a,#2			; probspawn aliens are never counted
+	jnz	.negend
+	; ask RNG if we should spawn
+	mov	a,r3
+	mov	r2,a
+	call	getrandbyte		; destroys R1 and R3!
+	add	a,r4
+	jnc	.negend			; decided against spawning
+	; spawn alien
+	mov	a,#0ffh
+	movx	@r0,a			; no spawn wait
+	mov	a,r2
+	inc	r0
+	movx	@r0,a			; type of alien
+	dec	r0
+	; alien spawned
+	mov	r1,#eram_probspawn
+	mov	a,#PROBSPAWN_BLOCK	; number of aliens until active again
+	movx	@r1,a
+	clr	a
+	ret
+	endsection probabilityspawn
+
+; check if there is already an alien of a certain type active
+; Input
+;  R3 type to check for
+; Output
+;  A=0 respawn possible
+;  A=1 already alien active
+;  A=2 all aliens of this type are shot
+; Preserve
+;  R0 iram_alien?_t to use for spawning
+checkalien section checkalien
+	; search through aliens
+	mov	r1,#iram_alien0_t
+	mov	r2,#3
+.loop	mov	a,r1
+	xrl	a,r0		; compare with spawning alien
+	jz	.skipit		; do not check spawning alien
+	mov	a,@r1
+	anl	a,#07ch		; mask out frame and explosion
+	rr	a
+	rr	a		; convert to normal type
+	xrl	a,r3
+	jz	.found		; alien found
+	; check type of new alien waiting to spawn
+	mov	a,@r1
+	inc	r1
+	anl	a,#0fch		; mask out frame info
+	jnz	.nonempty
+	; alien currently empty, check type of next alien to spawn here
+	movx	a,@r1		; eram_alien?_a contains type
+	xrl	a,r3
+	jz	.found
+.nonempty
+	inc	r1
+	inc	r1		; next iram_alien?_t
+	djnz	r2,.loop
+	; alien not found, now check alien variables
+	mov	a,r3
+	add	a,#eram_alienvar-1
+	mov	r1,a
+	movx	a,@r1
+	jz	.nomore		; no more aliens left
+	; respawn possible
+	clr	a
+	ret
+.found	; alien found
+	mov	a,#1
+	ret
+.nomore	; no aliens left
+	mov	a,#2
+	ret
+.skipit	; skip this alien completely
+	inc	r1
+	jmp	.nonempty
+	endsection checkalien
+
+; unsigned binary multiplication of two 8 bit values into one 16 bit value
+mult8	section mult8
+; Input:
+;  R3, R6 values to multiply
+; Output:
+;  (R1,R2) result
+; Preserve:
+;  R0 R4 R7
+; Usage:
+;  (R1,R2) result
+;  R3 right shifted mask
+;  (R5,R6) left shifted add
+
+	; initialise result
+	mov	r1,#0
+	mov	r2,#0
+	; initialise intermediate storage
+	mov	r5,#0
+.loop	; check if finished, rotate mask
+	clr	c		; unknown carry when entering routine
+	mov	a,r3
+	jz	.end		; mask = 0, finished
+	rrc	a
+	mov	r3,a		; mask for next round
+	jnc	.noadd		; bit was 0, don't add
+	; bit was 1, add (R5,R6) to (R1,R2)
+	mov	a,r2		; first lowbyte
+	add	a,r6		; add second lowbyte
+	mov	r2,a		; store result lowbyte
+	mov	a,r1		; get first highbyte
+	addc	a,r5		; add second highbyte and carry from lowbyte
+	mov	r1,a		; store result highbyte
+.noadd	; shift (R5,R6) left
+; The carry bit is always 0 here, it would be one if the result would overflow,
+; but 8bit*8bit fits always into 16bit.
+	mov	a,r6
+	rlc	a
+	mov	r6,a
+	mov	a,r5
+	rlc	a
+	mov	r5,a
+	jmp	.loop		; next round
+.end	ret
+	endsection mult8
+
+; For all alien creation routines (new_):
+; Input:
+;   R0 iram_alien?_t
+; Trash
+;   R0 iram_alien?_t may be overwritten
+
+; create a new ALN_UFO
+new_ufo	section newufo
+	; set alien speed, additional data unused
+	call	getrandbyte		; random value for direction
+	anl	a,#010h			; only need 1 bit
+	jnz	.skip1			; if set, speed 1
+	mov	a,#0f0h			; not set, speed -1
+.skip1	movx	@r0,a
+	; set y position: 22*(aliennumber-1)+TOPY
+	mov	r1,#eram_timel
+	movx	a,@r1
+	anl	a,#3		; contains alien number 1-3
+	mov	r7,a
+	swap	a		; *16
+	add	a,r7
+	add	a,r7
+	add	a,r7
+	add	a,r7
+	add	a,r7
+	add	a,r7
+	add	a,#TOPY-22
+	inc	r0
+	mov	@r0,a			; iram_alien?_y
+	inc	r0
+	; random x position, 00eh-08dh, legal 8-92
+	call	getrandbyte		; random value for x pos
+	anl	a,#07fh
+	add	a,#00eh
+	mov	@r0,a			; iram_alien?_x
+	ret
+	endsection newufo
+
+; create a new ALN_DISC
+new_disc	section newdisc
+	; set alien speed, additional data unused
+	call	getrandbyte		; random value for direction
+	mov	r1,#01fh		; x speed positive
+	jb7	.xspeed
+	mov	r1,#0ffh		; x speed negative
+.xspeed	mov	a,r1
+	movx	@r0,a
+	inc	r0
+	mov	@r0,#TOPY		; iram_alien?_y to top of screen
+	inc	r0
+	; random x position, 00eh-08dh, legal 8-92
+	call	getrandbyte		; random value for x pos
+	anl	a,#07fh
+	add	a,#00eh
+	mov	@r0,a			; iram_alien?_x
+	ret
+	endsection newdisc
+
+; create a new ALN_BOMB
+new_bomb section newbomb
+	call	getrandbyte		; random value for direction
+	jb7	.fromleft
+	; come from right
+	mov	a,#0e0h
+	movx	@r0,a			; speed
+	inc	r0
+	mov	@r0,#TOPY
+	inc	r0
+	mov	@r0,#RIGHTX
+	ret
+.fromleft
+	; come from left
+	mov	a,#020h
+	movx	@r0,a			; speed
+	inc	r0
+	mov	@r0,#TOPY
+	inc	r0
+	mov	@r0,#LEFTX
+	ret
+	endsection newbomb
+
+; create new ALN_RANDOM
+; random X position, random Y pos in top 15 lines, random X/Y direction
+new_random section newrandom
+	; set speed value, any of 6 directions
+.getdir	call	getrandbyte
+	anl	a,#007h
+	add	a,#lo(.dirtab)
+	movp	a,@a
+	jz	.getdir			; until direction legal
+	movx	@r0,a			; speed
+	; set y position, TOPY-(00fh+TOPY)
+	call	getrandbyte
+	anl	a,#00fh
+	add	a,#TOPY
+	inc	r0
+	mov	@r0,a			; iram_alien?_y
+	; set time until next direction change to max
+	mov	a,#0ffh
+	movx	@r0,a			; eram_alien?_a
+	; set x position, 00eh-08dh
+	call	getrandbyte
+	anl	a,#07fh
+	add	a,#00eh
+	inc	r0
+	mov	@r0,a			; iram_alien?_x
+	ret
+; possible directions: right, right+down, ...
+.dirtab	db	010h, 011h, 000h, 0F1h, 0F0h, 0FFh, 000h, 01Fh
+	assert "hi(new_random) == hi($)"
+
+	endsection newrandom
+
+; create new ALN_ATTACK
+; X position middle, Y position top
+; move left/right down
+new_attack section newattack
+	; decide about left/right
+	call getrandbyte
+	jb7	.toleft
+	mov	a,#022h
+	jmp	.cont
+.toleft	mov	a,#0e2h
+.cont	movx	@r0,a			; eram_alien?_v
+	inc	r0
+	clr	a
+	movx	@r0,a			; eram_alien?_a, no target x
+	mov	@r0,#TOPY		; top line
+	inc	r0
+	movx	@r0,a			; eram_alien?_b, target x
+	; set x position, 00eh-08dh
+	call	getrandbyte
+	anl	a,#07fh
+	add	a,#00eh
+	mov	@r0,a			; iram_alien?_x
+	ret
+	endsection newattack
+
+; create a new ALN_BOOMERANG
+; x position random, y position top of screen, additional offset to ship
+new_boom section newboomerang
+	; speed 0
+	clr	a
+	movx	@r0,a			; eram_alien?_v
+	inc	r0
+	; set y position, top of screen
+	mov	@r0,#TOPY		; iram_alien?_y
+	; set x position, 00eh-08dh
+	call	getrandbyte
+	anl	a,#07fh
+	add	a,#00eh
+	inc	r0
+	mov	@r0,a			; iram_alien?_x
+	; decide about left/right offset to prevent easy shooting
+	call getrandbyte
+	mov	r1,#7			; 7 pixels to the right
+	jb7	.setb
+	mov	r1,#0f9h		; 7 pixels to the left
+.setb	mov	a,r1
+	movx	@r0,a			; eram_alien?_b
+	ret
+	endsection newboomerang
+
+; here starts bank2 MB1 ------------------------------------------------------
+
+	org	0800h			; bank2/mb1
+
+	include	"switchmb1.h"		; bank switch table for mb1
+
+	org	084ch
+
+; display bonus screen, add bonus from target vars to main score
+bonusscreen section bonusscreen
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+
+	; clear bonus
+	mov	r0,#eram_bonush
+	clr	a
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+
+	; check if all targets saved
+	bcall	checkbonus
+	jz	.notall
+
+	; all targets saved, add special bonus and draw gfx for perfect
+	mov	r0,#eram_bonusl
+	clr	a			; all targets saved bonus
+	call	addbcd16
+	call	drawbonusspr
+
+.notall	; play tune: level win
+	mov	a,#lo(tune_levelwin)
+	sel	mb0
+	call	playsound
+	sel	mb1
+
+	; set start wait
+	mov	r0,#iram_bonuswait
+	mov	@r0,#120
+
+	; add target vars to get bonus
+	section getbonus
+	mov	r1,#eram_targets
+	mov	r3,#12
+.loop	movx	a,@r1
+	jz	.next			; 0 is special bonus in addbcd16
+	mov	r0,#eram_bonusl
+	call	addbcd16
+.next	inc	r1
+	djnz	r3,.loop
+	endsection getbonus
+
+	; now display score and bonus
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	sel	mb0
+	call	gfxoff
+	sel	mb1
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black
+	movx	@r0,a
+	; print "SCORE"
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(scoretext)
+	call	setquad
+	mov	r0,#vdc_quad1
+	call	setquad
+	; print "BONUS"
+	mov	r0,#vdc_quad2
+	mov	r1,#lo(bonustext)
+	call	setquad
+	mov	r0,#vdc_quad3
+	call	setquad
+
+	; add bonus to score
+	section addbonus
+.loop	sel	mb0
+	call	waitvsync
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	call	gfxoff
+	; display score
+	mov	r0,#vdc_char0
+	mov	r3,#054h
+	mov	r4,#040h
+	mov	r6,#col_chr_cyan
+	mov	r1,#eram_scoreh
+	bcall	showscoreb2
+	; display bonus
+	mov	r0,#vdc_char6
+	mov	r3,#054h
+	mov	r4,#070h
+	mov	r6,#col_chr_white
+	mov	r1,#eram_bonush
+	bcall	showscoreb2
+	call	gfxon
+
+	; wait some time between bonus moves, first wait is longer
+	section wait
+	mov	r0,#iram_bonuswait
+	mov	a,@r0
+	mov	r7,a
+.loop	sel	mb0
+	call	waitvsync
+	sel	mb1
+	call	colorcycle
+	djnz	r7,.loop
+	; wait finished, start new wait for next
+	mov	r0,#iram_bonuswait
+	mov	@r0,#30
+	endsection wait
+
+	; find lowest non-zero nibble of bonus and add to score
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0afh	; ... extram
+	mov	r0,#eram_bonusl
+	mov	r1,#eram_scorel
+	mov	r2,#3
+.nibble	movx	a,@r0
+	anl	a,#00fh		; test low nibble non-zero
+	jnz	.low
+	movx	a,@r0
+	anl	a,#0f0h		; test high nibble non-zero
+	jnz	.high
+	dec	r0		; try next byte
+	dec	r1
+	djnz	r2,.nibble
+	jmp	.end		; bonus zero, finished
+
+.low	; low nibble
+	mov	r3,#1
+	; reduce low nibble
+	movx	a,@r0
+	dec	a
+	movx	@r0,a
+	jmp	.add
+
+.high	; high nibble
+	mov	r3,#010h
+	; reduce high nibble
+	movx	a,@r0
+	add	a,#0f0h
+	movx	@r0,a
+
+.add	; add value
+	movx	a,@r1
+	add	a,r3
+	da	a			; BCD correction
+	movx	@r1,a
+	; adjust rest of score
+.adjust	djnz	r2,.cont		; stop when all 3 bytes processed
+	jmp	.ckscor			; check for max score
+.cont	dec	r1
+	movx	a,@r1			; get next byte
+	addc	a,#0			; add carry
+	da	a			; BCD correction
+	movx	@r1,a			; store byte
+	jmp	.adjust
+
+.ckscor	; max score at 999999
+	jnc	.beep
+	mov	a,#099h
+	movx	@r1,a
+	inc	r1
+	movx	@r1,a
+	inc	r1
+	movx	@r1,a
+.beep	sel	mb0
+	mov	a,#lo(tune_bonusbeep)
+	call	playsound
+	sel	mb1
+	jmp	.loop
+.end	endsection addbonus
+
+	section joystick
+	; init joystick FSM with auto continue
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_joystate
+	clr	a
+	movx	@r0,a
+	inc	r0
+	mov	a,#253			; 3 seconds auto continue
+	movx	@r0,a
+	clr	a
+	inc	r0
+	movx	@r0,a
+	; wait until joystick button pressed
+.joy	sel	mb0
+	call	waitvsync
+	sel	mb1
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	call	colorcycle
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	sel	mb0
+	call	waitfire
+	sel	mb1
+	jz	.joy
+	endsection joystick
+
+	jmp	switchmb1_3		; back to bank 3
+	endsection bonusscreen
+
+; possibly start a power-up
+powerupstart section powerupstart
+; Input:
+;  R0 iram_ashot?_x
+	; see if there is already a power-up active
+	mov	r1,#eram_powerup
+	movx	a,@r1
+	jnz	.nopow
+	; check for possible overlaps with other shots
+	mov	r1,#iram_ashot0_x
+	mov	r2,#3
+.overlp	; check for same shot
+	mov	a,r1
+	xrl	a,r0
+	jz	.overnx		; to next shot
+	; check for empty shot
+	mov	a,@r1
+	xrl	a,#0f8h
+	jz	.overnx		; to next shot
+	; overlap check
+	mov	a,@r0		; x position of power-up
+	cpl	a
+	inc	a
+	add	a,@r1		; x(shot)-x(power-up), 0f8h-008h overlaps
+	add	a,#8		; 000h-010h overlaps
+	add	a,#0efh
+	jnc	.nopow		; overlap, no power-up
+.overnx	inc	r1
+	inc	r1
+	djnz	r2,.overlp
+	; get random value
+	sel	mb0
+	call	getrandbyte
+	sel	mb1
+	; probability depends on level, read from table
+	mov	r2,a
+	mov	r1,#iram_level
+	mov	a,@r1
+	add	a,#lo(.powerprobs)
+	movp	a,@a
+	add	a,r2
+	jc	.power
+
+.nopow	; no power-up, clear ashot
+	mov	a,#0f8h
+	mov	@r0,a
+	inc	r0
+	mov	@r0,a
+	jmp	switchmb1_3		; back to bank 3
+
+.power	; start power-up
+	sel	mb0
+	call	getrandbyte
+	sel	mb1
+	; parameters for shield
+	mov	r2,#019h		; 'S'
+	mov	r3,#75			; timeout
+	add	a,#PROB_POW_SHIELD
+	jc	.setit
+	; parameters for 10 points
+	mov	r2,#030h		; '10'
+	mov	r3,#150			; timeout
+	add	a,#PROB_POW_TEN
+	jc	.setit
+	; parameters for fast shot
+	mov	r2,#01bh		; 'F'
+	mov	r3,#100			; timeout
+	add	a,#PROB_POW_SHOT
+	jc	.setit
+	; parameters for alien slow down
+	mov	r2,#020h		; 'A'
+	mov	r3,#100			; timeout
+.setit	mov	a,r0
+	mov	r1,#eram_powerup
+	movx	@r1,a
+	inc	r1
+	mov	a,r3			; timeout
+	movx	@r1,a
+	inc	r1
+	mov	a,r2			; type
+	movx	@r1,a
+	; now clear speed
+	clr	a
+	movx	@r0,a
+	jmp	switchmb1_3		; back to bank 3
+
+; probabilities for power-up creation
+.powerprobs
+	db	020h, 024h, 028h, 02ch, 030h, 038h, 040h
+
+	endsection powerupstart
+
+; collect power-ups by ship contact
+powerupcollect section powerupcollect
+	; see if power-up is active
+	mov	r0,#eram_powerup
+	movx	a,@r0
+	jnz	.check
+.ret	jmp	switchmb1_3		; back to bank 3
+.check	mov	r1,a			; iram_ashot?_x
+	mov	r0,#iram_ship_x
+	mov	a,@r1
+	cpl	a
+	inc	a
+	add	a,@r0			; x(ship)-x(power-up)
+	; collect when -9/9 0f7h/009h
+	add	a,#9			; 0/012h
+	add	a,#0edh
+	jc	.ret			; outside range
+	inc	r1			; iram_ashot?_y
+	inc	r0			; iram_ship_y
+	mov	a,@r1
+	cpl	a
+	inc	a
+	add	a,@r0			; y(ship)-y(power-up)
+	; collect when -18/16 0eeh/010h
+	add	a,#012h			; 0/022h
+	add	a,#0ddh
+	jc	.ret			; outside range
+	mov	r1,#eram_powerup
+	movx	a,@r1
+	mov	r0,a			; iram_ashot?_x
+	jmp	poweruphit
+	endsection powerupcollect
+
+; check for end of explosion anim and clear alien
+; start power-up on finished explosions
+endofexplosion section endofexplosion
+	; need a free ashot for power-up handling
+	mov	r1,#0			; no free shot
+	mov	r0,#iram_ashot0_x
+	mov	r2,#3
+.loop0	mov	a,@r0
+	xrl	a,#0f8h
+	jnz	.next0
+	mov	a,r0
+	mov	r1,a			; free shot found
+	jmp	.break0
+.next0	inc	r0
+	inc	r0
+	djnz	r2,.loop0
+
+.break0	; free shot in R1 or 0 of none was there
+	; check for finished explosions
+	mov	r6,#0			; clear power-up start flag
+	mov	r0,#iram_alien0_t
+	mov	r2,#3
+.loop	mov	a,@r0
+	anl	a,#083h			; explosion flag set, last anim frame
+	xrl	a,#083h
+	jnz	.skpclr
+	jmp	.clear			; found, clear this alien
+.skpclr inc	r0
+	inc	r0
+	inc	r0
+.next	djnz	r2,.loop
+
+	; possible power-up candidate found?
+	mov	a,r6
+	jnz	.pwrup
+
+	jmp	switchmb1_3		; back to bank 3
+
+	org	09fbh			; align lo(jz .clral) == 0
+
+.pwrup	; found a power-up candidate
+	mov	a,r1
+	mov	r0,a
+	jmp	powerupstart
+
+.clear	; end of explosion anim
+	; copy data for power-up, only if shot is free
+	mov	a,r1
+	jz	.clral			; no shot found, just clear alien
+	; copy position
+	inc	r0			; iram_alien?_y
+	inc	r0			; iram_alien?_x
+	mov	a,@r0
+	mov	@r1,a
+	inc	r1			; iram_ashot?_y
+	dec	r0			; iram_alien?_y
+	mov	a,@r0
+	mov	@r1,a
+	dec	r0			; iram_alien?_t
+	dec	r1			; iram_ashot?_x
+	mov	r6,#1			; start power-up
+
+.clral ; clear alien
+	clr	a
+	mov	@r0,a			; iram_alien?_t
+	movx	@r0,a			; eram_alien?_v, used as respawn counter
+	inc	r0
+	mov	@r0,#0f8h		; iram_alien?_y
+	inc	r0
+	mov	@r0,#0f8h		; iram_alien?_x
+	inc	r0
+	jmp	.next
+	endsection endofexplosion
+
+; move data into quad, other banks have the same routine but other data
+; Input: r0 quad, r1 pointer to text
+setquad section setquad
+; NOTE:
+; This routine copies a ROM table into a quad, all 4 chars are set. It copies
+; 4 bytes, position and contents of the first sub-quad and then only fills
+; in the contents for the next 3 sub-quads, the position data is skipped as
+; it is not used.
+	mov	r2,#4
+	mov	r3,#4
+.loop0	mov	a,r1
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	djnz	r2,.loop0
+	inc	r0
+	inc	r0
+	mov	r2,#2
+	djnz	r3,.loop0
+	ret
+	endsection setquad
+
+	codepage videopac
+
+scoretext
+	quaddef 014h, 040h, cyan, " SOE"
+	quaddef 01ch, 040h, cyan, " CR "
+
+bonustext
+	quaddefcolor 014h, 070h, black, red, blue, yellow, ' BNS'
+	quaddefcolor 01ch, 070h, black, green, violet, black, ' OU '
+
+	codepage standard
+
+	assert "hi(scoretext) == hi($)"
+
+; add 16 bit table value to bcd stored score/bonus
+addbcd16 section addbcd16
+; Input:
+;  A type of bonus
+;  R0 pointer to lowest byte of BCD value
+; Destroy:
+;  A R0 R2 R4
+	rl	a			; 2 bytes per entry
+	add	a,#lo(bonustable16)
+	mov	r4,a			; store pointer to entry
+	movp	a,@a
+	mov	r2,a			; points to add low byte
+	movx	a,@r0			; get low byte bonus
+	add	a,r2			; add points low byte
+	da	a			; BCD correction
+	movx	@r0,a			; new low byte
+	dec	r0
+
+	mov	a,r4			; get pointer to entry
+	inc	a
+	movp	a,@a
+	mov	r2,a			; points to add high byte
+	movx	a,@r0			; middle byte bonus
+	addc	a,r2			; add points high byte
+	da	a			; BDC correction
+	movx	@r0,a			; new middle byte
+	dec	r0
+
+	movx	a,@r0			; bonus high byte
+	addc	a,#0
+	da	a
+	movx	@r0,a			; new high byte
+
+	jnc	.ret			; no overflow
+
+	; maximum points reached
+	mov	a,#099h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+.ret	ret
+	endsection addbcd16
+
+bonustable16
+	dw	00250h			; bonus for all saved
+	dw	00005h			; tree
+	dw	00025h			; house
+	dw	00100h			; big pyramid
+	dw	00050h			; middle pyramid
+	dw	00030h			; small pyramid
+	dw	00025h			; tiny pyramid
+	dw	00050h			; mini submarine
+	dw	00100h			; castle
+	dw	00030h			; van
+	dw	00075h			; train car
+	dw	00100h			; train engine
+	dw	00200h			; space port
+	dw	00150h			; space ship
+	dw	00050h			; street lantern
+	dw	00025h			; car
+
+	assert "hi(addbcd16) == hi($)"
+
+; a power-up is hit/collected
+poweruphit section poweruphit
+; Input
+;  R0 iram_ashot?_x of power-up
+;  R1 eram_powerup
+	clr	a
+	movx	@r1,a			; clear power-up mode
+	; clear ashot
+	mov	@r0,#0f8h
+	inc	r0
+	mov	@r0,#0f8h
+	; handle power-up
+	mov	r0,#eram_powertype
+	movx	a,@r0
+	xrl	a,#019h			; 'S'
+	jz	.shield
+	movx	a,@r0
+	xrl	a,#030h			; '10'
+	jz	.ten
+	movx	a,@r0
+	xrl	a,#01bh			; 'F'
+	jz	.fast
+	movx	a,@r0
+	xrl	a,#020h			; 'A'
+	jz	.slow
+	; unknown power-up
+.ret	jmp	switchmb1_3		; back to bank 3
+
+.shield	; shield power-up
+	; play tune
+	mov	a,#lo(tune_powerbeep)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; increase shield
+	mov	r0,#iram_shield
+	mov	a,@r0
+	jz	.ret			; shield already gone
+	xrl	a,#SHIELD
+	jz	.ret			; shield full
+	inc	@r0			; increase shield
+	jmp	switchmb1_3		; back to bank 3
+
+.ten	; 10 points power-up
+	; play tune
+	mov	a,#lo(tune_powerbeep)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; add points
+	mov	a,#7			; always 10 points
+	bcall	addscoreb2		; add to score
+	jmp	switchmb1_3		; back to bank 3
+
+.fast	section fastshot
+	; faster shot
+	; play tune
+	mov	a,#lo(tune_powerbeep)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; check for already active shot speed change
+	mov	r0,#eram_shottime
+	movx	a,@r0
+	jz	.new
+	; just set new timeout
+	mov	a,#05eh			; 30 seconds on PAL
+	movx	@r0,a
+	jmp	switchmb1_3		; back to bank 3
+.new	; set timeout value
+	mov	a,#05eh			; 30 seconds on PAL
+	movx	@r0,a
+	; increase shot multi, 0 to 1, rest to 3
+	mov	r0,#eram_shotmulti
+	mov	r2,#1
+	movx	a,@r0
+	jz	.set
+	mov	r2,#3
+.set	mov	a,r2
+	movx	@r0,a
+	; change color of shield bar
+	mov	r0,#iram_color2
+	mov	a,#0ffh - col_grd_white
+	anl	a,@r0
+	orl	a,#col_grd_red
+	mov	@r0,a
+	jmp	switchmb1_3		; back to bank 3
+	endsection fastshot
+
+.slow	section alienslow
+	; play tune
+	mov	a,#lo(tune_powerbeep)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; set timeout value
+	mov	r0,#eram_slowdown
+	mov	a,#05eh			; 30 seconds on PAL
+	movx	@r0,a
+	jmp	switchmb1_3		; back to bank 3
+	endsection alienslow
+
+	endsection poweruphit
+
+; set sprite colors for "perfect gfx" to colorcycle
+colorcycle section colorcycle
+	sel	mb0
+	call	gfxoff
+	mov	r0,#vdc_spr0_ctrl+2	; sprite color register
+	mov	r1,#iram_colcycle	; used for color cycling effects
+	inc	@r1
+	mov	a,@r1
+	rl	a
+	rl	a			; 2 shifts, color changes every 2nd
+	anl	a,#038h			; mask out color
+	mov	r1,#4			; 4 sprites
+.sprlop	movx	@r0,a			; set color
+	inc	r0
+	inc	r0
+	inc	r0
+	inc	r0			; next sprite
+	djnz	r1,.sprlop
+	call	gfxon
+	sel	mb1
+	ret
+	endsection colorcycle
+
+; use the 4 sprites to draw a small gfx when all targets are saved
+drawbonusspr	section drawbonussprites
+	; turn gfx off
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	sel	mb0
+	call	gfxoff
+	sel	mb1
+	; copy sprite control
+	mov	r0,#vdc_spr0_ctrl
+	mov	r1,#16
+	mov	r2,#lo(bonusdata)
+.loop1	mov	a,r2
+	movp	a,@a
+	movx	@r0,a
+	inc	r2
+	inc	r0
+	djnz	r1,.loop1
+	; copy shapes
+	mov	r0,#vdc_spr0_shape
+	mov	r1,#32
+.loop2	mov	a,r2
+	movp	a,@a
+	movx	@r0,a
+	inc	r2
+	inc	r0
+	djnz	r1,.loop2
+	; back to extram
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	ret
+	endsection drawbonussprites
+
+; data for "PERFECT" gfx
+bonusdata
+	; sprite control
+	db	056h, 044h, col_spr_yellow, 0
+	db	056h, 04ch, col_spr_yellow, 0
+	db	056h, 054h, col_spr_yellow, 0
+	db	056h, 05ch, col_spr_yellow, 0
+	; sprite bitmaps
+	db	00000000b
+	db	11111110b
+	db	00110011b
+	db	10101011b
+	db	00110011b
+	db	10111011b
+	db	00111011b
+	db	11111110b
+
+	db	00000000b
+	db	11111111b
+	db	00110010b
+	db	10101011b
+	db	00110011b
+	db	10101011b
+	db	10101010b
+	db	11111111b
+
+	db	00000000b
+	db	11111111b
+	db	01100010b
+	db	10111011b
+	db	10110011b
+	db	10111011b
+	db	01100011b
+	db	11111111b
+
+	db	00000000b
+	db	00111111b
+	db	01100010b
+	db	01110111b
+	db	01110111b
+	db	01110111b
+	db	01110110b
+	db	00111111b
+
+	assert "hi(bonusdata) == hi(drawbonusspr)"
+	assert "hi(bonusdata) == hi($)"
+
+; count down slowdown until 0, executed every 16th frame on 0
+slowdownexpire section slowdownexpire
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#0fh
+	jnz	.ret
+	; check if timer is running
+	mov	r0,#eram_slowdown
+	movx	a,@r0
+	jz	.ret			; not active
+	dec	a
+	movx	@r0,a
+	jnz	.ret			; not reached 0 yet
+	; play sound
+	mov	a,#lo(tune_powerend)
+	sel	mb0
+	call	playsound
+	sel	mb1
+.ret	jmp	switchmb1_3
+	endsection slowdownexpire
+
+; draw a mountain background for the train level
+mountainplus section mountainplus
+	; define charset
+	mov	a,#0
+	mov	r2,#lo(mountain_bits1)
+	mov	r3,#020h
+	mov	r4,#039h
+	call	defchr
+	mov	a,#1
+	mov	r2,#lo(mountain_bits2)
+	mov	r3,#039h
+	mov	r4,#050h
+	call	defchr
+	mov	a,#2
+	mov	r2,#lo(mountain_bits3)
+	mov	r3,#0a0h
+	mov	r4,#0ach
+	call	defchr
+	; draw chains
+	mov	r2,#lo(mountainchain)
+	call	drawchain
+	; draw lines
+	mov	r2,#lo(filltable)
+	call	fillines
+	; draw base of mountain
+	call	basefill
+	jmp	switchmb1_1
+	endsection mountainplus
+
+;FREE: 048h
+
+	org	0c00h
+
+; draw a chain of characters
+drawchain section drawchain
+; Input
+;  R2 pointer to table
+; Usage
+;  iram_xpos current char
+;  R3 x position
+;  R4 y position
+;  R5 table byte, 0 == get next
+;  iram_attr attribute byte
+	; get data from table
+	mov	a,r2
+	movp	a,@a
+	jnz	.cont1
+	ret				; x position 0 = end of table
+.cont1	mov	r3,a
+	inc	r2
+	mov	a,r2
+	movp	a,@a
+	mov	r4,a
+	inc	r2
+	mov	a,r2
+	movp	a,@a
+	mov	r1,#iram_xpos
+	mov	@r1,a
+	inc	r2
+	mov	a,r2
+	movp	a,@a
+	mov	r0,#iram_attr
+	mov	@r0,a
+	inc	r2
+	mov	r5,#0
+.loop	; set position
+	mov	r7,#plus_cmd_loady
+	mov	a,r4
+	mov	r6,a
+	sel	mb0
+	call	pluscmd
+	mov	r7,#plus_cmd_loadx
+	mov	a,r3
+	mov	r6,a
+	call	pluscmd
+	; draw char
+	mov	r0,#iram_attr
+	mov	a,@r0
+	mov	r6,a
+	mov	r0,#iram_xpos
+	mov	a,@r0
+	mov	r7,a
+	call	plusdata
+	sel	mb1
+	; next char
+	mov	r0,#iram_xpos
+	inc	@r0
+	; check for table fetch
+	mov	a,r5
+	jnz	.newpos
+	; need to fetch new value from table
+	mov	a,r2
+	movp	a,@a
+	mov	r5,a
+	inc	r2
+.newpos	; set new drawing position as coded in high nibble
+	swap	a
+	anl	a,#0fh
+	mov	r6,a
+	xrl	a,#0fh
+	jz	drawchain		; 00fh, start new chain
+	; x position
+	mov	a,r6
+	anl	a,#3
+	add	a,r3
+	mov	r3,a
+	; y position
+	mov	a,r6
+	anl	a,#0ch
+	rr	a
+	rr	a
+	jb1	.sign
+	jmp	.newy
+.sign	orl	a,#0fch				; negative y, do sign expansion
+.newy	add	a,r4
+	mov	r4,a
+	; use next nibble
+	mov	a,r5
+	swap	a
+	anl	a,#0f0h
+	mov	r5,a
+	jmp	.loop
+
+	endsection drawchain
+
+; char chains structure:
+; x position, y position, start char, attribute
+; offsets nibblewise: 2 bits signed y offset, 2 bits unsigned x offset
+;  end chain with 0fh nibble
+; end table with x position 0
+
+mountainchain
+	; body/sky
+	db	1, 11, 0a0h, col_plus_cyan
+	db	01dh, 01ch, 01ch, 011h, 041h, 041h, 0c1h, 0c1h, 0d1h, 0ffh
+	; body/sky
+	db	21, 7, 0b3h, col_plus_cyan
+	db	041h, 014h, 0d1h, 01ch, 01fh
+	; body/sky
+	db	32, 7, 0bdh, col_plus_cyan
+	db	041h, 051h, 015h, 011h, 0ffh
+	; snow/sky first snow peak
+	db	13, 6, 0c6h, col_plus_white
+	db	0d1h, 021h, 051h, 0ffh
+	; snow/sky second snow peak
+	db	28, 6, 0cdh, col_plus_white
+	db	011h, 0ffh
+	; mountain/snow border first peak
+	db	14, 6, 0a0h, col_patr_stable | col_patr_blck | col_pbck_cyan | col_plus_white
+	db	011h, 011h, 041h, 0ffh
+	; mountain/snow border second peak
+	db	28, 7, 0a8h, col_patr_stable | col_patr_blck | col_pbck_cyan | col_plus_white
+	db	011h, 0ffh
+	; ends of multicolor chains
+	db	18, 6, 0a4h, col_patr_stable | col_patr_blck | col_pbck_violet | col_plus_white
+	db	0ffh
+	db	20, 7, 0a7h, col_patr_stable | col_patr_blck | col_pbck_violet | col_plus_cyan
+	db	0ffh
+	db	31, 7, 0abh, col_patr_stable | col_patr_blck | col_pbck_violet | col_plus_cyan
+	db	0ffh
+	db	0
+
+	assert	"hi(drawchain) == hi($)"
+
+; fill lines with blocks
+fillines section fillines
+; Input
+;  R2 pointer into ROM table
+	; read and set y position
+	mov	a,r2
+	movp	a,@a
+	jnz	.cont
+	ret
+.cont	inc	r2
+	mov	r6,a
+	mov	r7,#plus_cmd_brow
+	sel	mb0
+	call	pluscmd
+	; read and set x position
+	mov	a,r2
+	movp	a,@a
+	inc	r2
+	mov	r6,a
+	mov	r7,#plus_cmd_loadx
+	call	pluscmd
+	; read length from table
+	mov	a,r2
+	movp	a,@a
+	inc	r2
+	mov	r3,a
+	; read attribute from table
+	mov	a,r2
+	movp	a,@a
+	inc	r2
+	mov	r6,a
+	mov	r7,#07fh
+.loop	call	plusdata
+	djnz	r3,.loop
+	sel	mb1
+	jmp	fillines
+	endsection fillines
+
+filltable
+; y, x, length, attribute
+	db	5, 16, 1, col_plus_white
+	db	7, 14, 4, col_plus_cyan
+	db	8, 27, 5, col_plus_cyan
+	db	8, 12, 9, col_plus_cyan
+	db	9, 6, 1, col_plus_cyan
+	db	9, 11, 12, col_plus_cyan
+	db	9, 24, 10, col_plus_cyan
+	db	10, 5, 3, col_plus_cyan
+	db	10, 10, 27, col_plus_cyan
+	db	11, 3, 37, col_plus_cyan
+	db	0
+
+	assert	"hi(fillines) == hi($)"
+
+	org	0d00h
+
+; base of mountains: change background color in column 0, fill rest with spaces
+basefill section basefill
+	mov	r4,#12			; start line
+	sel	mb0
+.loop	mov	a,r4
+	mov	r6,a
+	mov	r7,#plus_cmd_brow
+	call	pluscmd
+	mov	r6,#col_pbck_cyan | col_plus_cyan
+	mov	r7,#col_satr_enable | col_satr_box
+	call	plusdata
+	mov	r2,#39
+	mov	r6,#0
+	mov	r7,#020h
+.linelp	call	plusdata
+	djnz	r2,.linelp
+	inc	r4
+	mov	a,r4
+	xrl	a,#16			; last line+1
+	jnz	.loop
+	sel	mb1
+	ret
+	endsection basefill
+
+; Define charset, identical to bank 1
+defchr	section definechars
+; Input:
+;  A  which call to use to get data
+;  R2 low byte of charset ROM pointer
+;  R3 first char to define, bit 7 is used for background gfx
+;  R4 last char to define+1
+	mov	r0,#iram_datacall
+	mov	@r0,a
+.loop2	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrni
+	sel	mb0
+	call	pluscmd		; do not move cursor
+	mov	a,r3
+	anl	a,#080h
+	mov	r6,a		; attribute parameter
+	mov	a,r3
+	orl	a,#080h
+	mov	r7,a		; char to redefine
+	call	plusdata	; print it
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrsl
+	call	pluscmd		; redefine char
+	mov	r5,#10		; 10 bytes in 1 char
+	sel	mb1
+.loop	mov	r0,#iram_datacall
+	mov	a,@r0
+	call	getbits
+	inc	r2		; advance pointer
+	mov	r6,a
+	mov	r7,a
+	sel	mb0
+	call	plusdata
+	sel	mb1
+	djnz	r5,.loop
+	inc	r3		; next char
+	mov	a,r3
+	xrl	a,r4		; check if last char reached
+	jnz	.loop2
+
+	; turn off char definition mode
+.ret	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wr
+	sel	mb0
+	call	pluscmd		; write to screen, auto advance cursor
+	sel	mb1
+	ret
+	endsection definechars
+
+; bitmap data dispatcher routine
+getbits section getbits
+	add	a,#lo(getbitstable)
+	jmpp	@a
+getbitstable
+	db	lo(.to0)
+	db	lo(.to1)
+	db	lo(.to2)
+.to0	jmp	getbits0
+.to1	jmp	getbits1
+.to2	jmp	getbits2
+	endsection getbits
+
+; bitmap data 2
+getbits2 section getbits2
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits2
+
+mountain_bits3
+	; 0a0h multicolor
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	00111111b
+	db	00000001b
+	db	00000000b
+
+	; 0a1h multicolor
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11000000b
+	db	00000000b
+	db	00000000b
+
+	; 0a2h multicolor
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00111110b
+
+	; 0a3h multicolor
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11110000b
+	db	10000000b
+
+	; 0a4h multicolor
+	db	00011111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0a5h multicolor
+	db	11111100b
+	db	11100000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	; 0a6h multicolor
+	db	00001111b
+	db	00000001b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	; 0a7h multicolor
+	db	00000111b
+	db	00000111b
+	db	00001111b
+	db	00111111b
+	db	00111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0a8h multicolor
+	db	11111111b
+	db	11111011b
+	db	11100000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	; 0a9h multicolor
+	db	11111111b
+	db	11111111b
+	db	00000011b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	; 0aah multicolor
+	db	11111111b
+	db	11111111b
+	db	00011111b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	; 0abh multicolor
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+;FREE: 018h
+
+	org	0e00h
+
+; bitmap data 0
+getbits0 section getbits0
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits0
+
+mountain_bits1
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11100000b
+	db	11111100b
+
+	db	10000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+	db	11111110b
+	db	11111110b
+
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+
+	db	00000000b
+	db	00111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+
+	; 0a9h
+	db	01111111b
+	db	01111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0aah
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+
+	; 0abh
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0ach
+	db	11110000b
+	db	11111000b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0adh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+
+	; 0aeh
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+	db	11111110b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0afh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+
+	; 0b0h
+	db	10000000b
+	db	11000000b
+	db	11110000b
+	db	11110000b
+	db	11111000b
+	db	11111110b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0b1h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11100000b
+	db	11111000b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+
+	; 0b2h
+	db	11111100b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0b3h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00001111b
+	db	00011111b
+
+	; 0b4h
+	db	00011111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0b5h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00001111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+
+	; 0b6h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000111b
+
+	; 0b7h
+	db	00011111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0b8h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11100000b
+	db	11111000b
+	db	11111110b
+
+	org	0f00h
+
+; bitmap data 2
+getbits1 section getbits1
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits1
+
+mountain_bits2
+	; 0b9h
+	db	00000000b
+	db	11000000b
+	db	11110000b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0bah
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0bbh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+	db	11110000b
+	db	11111100b
+
+	; 0bch
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11000000b
+	db	11100000b
+	db	11111000b
+	db	11111100b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0bdh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+
+	; 0beh
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0bfh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00001111b
+	db	00111111b
+	db	11111111b
+
+	; 0c0h
+	db	00000011b
+	db	00001111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0c1h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000011b
+	db	00011111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0c2h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00111111b
+	db	11111111b
+
+	; 0c3h
+	db	00000011b
+	db	00001111b
+	db	00111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0c4h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00001111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0c5h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00001111b
+	db	00011111b
+
+	; 0c6h
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11000000b
+	db	11000000b
+	db	11100000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111000b
+
+	; 0c7h
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+	db	11110000b
+	db	11111100b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+
+	; 0c8h
+	db	11000000b
+	db	11111000b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0c9h
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0cah
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000111b
+
+	; 0cbh
+	db	00000000b
+	db	00000000b
+	db	00000011b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0cch
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+
+	; 0cdh
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+	db	11100000b
+	db	11110000b
+	db	11111100b
+
+	; 0ceh
+	db	00000000b
+	db	11100000b
+	db	11111100b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	; 0cfh
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00001111b
+	db	00011111b
+	db	00011111b
+	db	00111111b
+
+	org	0feah
+
+	db	0, "$Revision: 1.125 $", 0
+
+	end

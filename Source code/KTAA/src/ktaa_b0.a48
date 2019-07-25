@@ -1,0 +1,1184 @@
+; Kill the attacking aliens for the G7000 / G7400 by Soeren Gust
+;
+; $Id: ktaa_b0.a48,v 1.185 2003/11/27 21:09:39 sgust Exp $
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is written for asl 1.41r8, see <http://www.alfsembler.de>. I use several
+; special features (macros, section) of asl, so using other assemblers
+; requires a lot of porting.
+
+	cpu	8048
+	page	0		; no page breaks in listings
+	macexp	off		; no macro expansions in listings
+	listing	noskipped	; only show active bank in listing
+
+BANK	equ	0		; current bank, needed for bankswitch macros
+
+	include	"g7000.h"
+	include	"charset.h"	; character set definition for g7000 chars
+	include	"bitfuncs.inc"	; part of asl distribution, see scoretext
+	include "common.h"	; variables, macros, defines
+	include "targets.h"	; target macro declarations
+
+; here starts bank0 MB0 ------------------------------------------------------
+
+	org	0400h			; bank0/mb0
+
+	jmp	plusselectgame		; RESET, BIOS, not in this bank
+	jmp	irq			; interrupt, BIOS
+	jmp	lineirqentry		; timer: line irq
+	jmp	myvsyncirq		; VSYNC-interrupt
+	jmp	selectgame		; after selectgame, no in this bank
+	jmp	mysoundirqentry		; custom tune player
+
+	db	"OPNB"			; marker for o2em means PIN B open
+
+; irq entry after bankswitching
+; we are already in bank 0 when the normal vsync interrupt happens in
+; the main game kernel
+
+myvsyncirqentry
+	nop				; there is bankswitching code
+	nop				; in bank 3 here
+	jmp	myvsyncirq
+
+lineirqentry
+	sel	rb0			; This is executed in bank 3
+	mov	r5,a			; This is executed in bank 3
+	in	a,P1			; This is executed in bank 3
+	mov	r6,a			; This is executed in bank 3
+	anl	P1,#0fch		; This is executed in bank 3
+	jmp	lineirq
+
+mysoundirqentry
+	nop				; there is bankswitching code
+	nop				; in bank 3 here
+	jmp	mysoundirq
+
+	include	"switchmb0.h"		; bank switch table for mb0
+
+	org	0460h
+
+; Because of problems with the stack (only 8 entries) I can't use printchar
+; inside this routine without trashing the stack, printchar calls putchar23
+; which calls calcchar23, so by using the mprintchar macro I free 2 stack
+; entries for use by the gameplay loop. (This routine is called inside
+; drawtargets). This routine is timing critical, especially on NTSC machines.
+myvsyncirq section myvsyncirq
+	; part of the vsync-irq
+	; we are in RB0, A and P1 are stored, VDC is enabled
+
+	; start drawing, if needed
+	mov	r0,#iram_ictrl		; control register
+	mov	a,@r0			; get value
+	jb7	vsyncdraw		; draw the playfield ?
+	jmp	vsyncirq		; continue normal interrupt
+
+vsyncdraw
+	section startraster
+	; start first raster line irq
+	mov	a,@r0
+	anl	a,#0ffh - ictrl_second	; clear second raster flag
+	mov	@r0,a
+	mov	r0,#iram_palflag
+	mov	a,@r0
+	jnz	.pal
+	; NTSC timing
+	mov	a,#0feh - GROUNDLEVEL
+	jmp	.timer
+	; PAL timing
+.pal	mov	a,#0fch - GROUNDLEVEL
+.timer	mov	t,a			; set # of lines to wait
+	strt	cnt			; start line counting
+	en	tcnti			; enable timer irq
+	endsection startraster
+
+	; we need R3-R6 for printchar, so we store them in eram
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_r3
+	mov	a,r3
+	movx	@r0,a
+	mov	a,r4
+	dec	r0
+	movx	@r0,a
+	mov	a,r5
+	dec	r0
+	movx	@r0,a
+	mov	a,r6
+	dec	r0
+	movx	@r0,a
+
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+
+	; set grid+background color, white when flash flag set
+	section setsky
+	mov	r0,#iram_ictrl		; control register
+	mov	a,@r0
+	xrl	a,#ictrl_flash		; invert flash flag
+	jb4	.noflsh
+	anl	a,#ictrl_flcount	; mask out flash counter
+	dec	a
+	mov	r1,a			; new counter value
+	mov	a,@r0			; old control
+	anl	a,#0ffh - ictrl_flcount	; remove old counter value
+	orl	a,r1			; insert new counter value
+	mov	@r0,a			; new control
+	mov	a,r1			; just the counter value
+	jnz	.flash			; not finished yet
+	mov	a,@r0			; old control
+	anl	a,#0ffh - ictrl_flash	; clear flash flag, counter already 0
+	mov	@r0,a			; new control
+.flash	mov	a,#080h | col_bck_white | col_grd_white | col_grd_lum
+	jmp	.setcol
+
+.noflsh	mov	r0,#iram_color1		; sky color
+	mov	a,@r0			; get from iram
+.setcol	mov	r0,#vdc_color		; color register
+	movx	@r0,a			; set it
+	jb7	.setp17			; check for P17
+	anl     P1,#07fh		; clear P17, highlight background
+	jmp	.end
+.setp17
+	orl	P1,#080h		; set P17, dark background
+.end	endsection setsky
+
+	; turn foreground gfx off
+	; no need to store old value, will be turned back on on gameplay
+	mov	r0,#vdc_control		; control register
+	movx	a,@r0
+	anl	a,#0ffh - vdc_ctrl_fore	; char+sprite off
+	movx	@r0,a
+
+	;## defense ship
+	section defenseship
+	; copy iram_ship* into sprite 0
+	mov	r0,#vdc_spr0_ctrl	; into sprite0
+	; y position
+	mov	r1,#iram_ship_y
+	mov	a,@r1			; get it
+	movx	@r0,a			; put into register
+	inc	r0
+	; x position
+	dec	r1
+	mov	a,@r1
+	movx	@r0,a			; put into register
+	inc	r0
+	; sprite control: change ship color in STATE_DEAD
+	mov	r1,#iram_gamestate
+	mov	a,@r1
+	xrl	a,#STATE_DEAD
+	mov	r1,#col_spr_cyan
+	jz	.setcol
+	mov	r1,#col_spr_white
+.setcol	mov	a,r1
+	movx	@r0,a
+	endsection defenseship
+
+	;## aliens: set shape
+	; I set a shape even on turned off aliens, because setshp advances
+	; the sprite shape pointer. Skipping setshp means that the next shape
+	; goes to the previous sprite, which is wrong.
+	section alienshapes
+	mov	r0,#vdc_spr1_shape
+	mov	r1,#iram_alien0_t
+	mov	r3,#3
+.alienshape
+	mov	a,@r1
+	jb7	.alienexp		; exploding alien
+	; iram_alien?_t is 4/5/6/7 for first alien, shape numbers are 0/1/2/3.
+	add	a,#0fch
+	jmp	.set
+.alienexp
+	anl	a,#003h			; get frame number
+	add	a,#24			; first explosion shape
+.set	call	setshp
+.nxtal	inc	r1
+	inc	r1
+	inc	r1			; next iram_alien?_t
+	djnz	r3,.alienshape
+	endsection alienshapes
+
+	;## defense ship shot (char 11)
+	section shipshot
+	mov	r0,#vdc_charb		; which char
+	mov	r1,#iram_shipshot_x	; x position
+	mov	a,@r1			; get from iram
+	mov	r3,a			; into register
+	mov	r1,#iram_shipshot_y	; y postion
+	mov	a,@r1			; get from iram
+	mov	r4,a			; into register
+	mov	r5,#027h		; dot
+	mov	r6,#col_chr_green
+	; modified mprintchar, cutting off empty lines
+	mov	a,r4		; y position
+	movx	@r0,a
+	inc	r0
+	mov	a,r3		; x position
+	movx	@r0,a
+	inc	r0
+	call	calcchar23	; calculate bytes 2 and 3
+	mov	a,r5
+	add	a,#5		; cut off 5 empty lines
+	jnc	.skipnc
+	inc	r6		; overflow, add carry
+.skipnc	movx	@r0,a		; set byte 2
+	inc	r0
+	mov	a,r6
+	movx	@r0,a		; set byte 3
+	endsection shipshot
+
+	;## aliens: set position, do not care if turned off, 0f8h/0f8h
+	section alienposition
+	mov	r0,#vdc_spr1_ctrl
+	mov	r1,#iram_alien0_t
+	mov	r2,#3
+.alienpos
+	; get type for later use
+	mov	a,@r1
+	mov	r3,a
+	; y position
+	inc	r1
+	mov	a,@r1
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	; x position
+	mov	a,@r1
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	; set alien color depending on type
+	mov	a,r3			; get type from above
+	anl	a,#07ch			; clear explosion flag and frame counter
+	rr	a
+	rr	a
+	add	a,#lo(.aliencol-1)	; first entry is for alien 1
+	movp	a,@a
+	movx	@r0,a			; set color
+.next	inc	r0
+	inc	r0
+	djnz	r2,.alienpos		; next alien
+	jmp	.end
+
+; colors for the aliens
+.aliencol
+	db	col_spr_red		; ALN_UFO
+	db	col_spr_green		; ALN_DISC
+	db	col_spr_blue		; ALN_BOMBER
+	db	col_spr_violet		; ALN_RANDOM
+	db 	col_spr_yellow		; ALN_ATTACK
+	db 	col_spr_cyan		; ALN_BOOMERANG
+	assert	"hi(.next-2) == hi($-1)"
+.end	endsection alienposition
+
+	;## alien shots
+	section alienshots
+	mov	r0,#eram_timel
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_powerup
+	movx	a,@r0
+	inc	a			; gets compared with ashot?_y
+	mov	r7,a			; store power-up flag
+	mov	r1,#iram_ashot0_x
+	mov	r2,#3
+.drawshots
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_timel
+	movx	a,@r0
+	mov	r6,a
+	mov	a,@r1			; get x position
+	mov	r3,a
+	inc	r1
+	mov	a,@r1			; get y position
+	mov	r4,a
+	mov	r5,#02ah		; div sign
+	mov	a,r6			; eram_timel
+	jb0	.dot2
+	mov	r5,#029h		; 'x'
+.dot2	; check for power-up
+	mov	a,r1			; iram_ashot?_y
+	xrl	a,r7			; eram_powerup
+	jnz	.print
+	; get power-up char
+	mov	r0,#eram_powertype
+	movx	a,@r0
+	mov	r5,a
+.print	; calculate r0
+	mov	a,r2			; 3 2 1
+	dec	a			; 2 1 0
+	rl	a
+	rl	a			; 8 4 0
+	add	a,#vdc_char8
+	mov	r0,a
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	mprintchar			; printit
+	inc	r1			; to next ashot?_x
+	djnz	r2,.drawshots
+	endsection alienshots
+
+	; restore R3-R6
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_r3
+	movx	a,@r0
+	mov	r3,a
+	dec	r0
+	movx	a,@r0
+	mov	r4,a
+	dec	r0
+	movx	a,@r0
+	mov	r5,a
+	dec	r0
+	; The value stored here is the old P1 before the interrupt and will be
+	; put back into P1 at the end of the normal interrupt routine. So I
+	; have to transfer the current P17 into this value.
+	movx	a,@r0
+	anl	a,#07fh			; clear old P17
+	mov	r6,a
+	in	a,P1
+	anl	a,#080h			; mask out new P17
+	orl	a,r6			; combine with rest of old P1
+	mov	r6,a
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+
+	jmp	vsyncirq		; continue with normal irq routine
+	endsection myvsyncirq
+
+; Raster line interrupt handler
+lineirq	section lineirq
+; Input: RB0, R6=P1, R5=A
+	; test for first/second raster irq
+	mov	r0,#iram_ictrl
+	mov	a,@r0
+	xrl	a,#ictrl_second
+	jb6	.first
+	jmp	.second
+
+; On first raster line irq I change the background color to ground and draw
+; the score.
+.first
+	mov	@r0,a		; set ictrl_second flag
+	mov	a,#0ffh - (SCOREY - GROUNDLEVEL + 8)
+	mov	t,a		; set # of lines to wait
+
+	; save R3-R6
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0afh	; ... extram
+
+	mov	a,r6		; P1 before irq
+	mov	r0,#eram_r6
+	movx	@r0,a
+	mov	a,r5		; A before irq
+	inc	r0
+	movx	@r0,a
+	mov	a,r4
+	inc	r0
+	movx	@r0,a
+	mov	a,r3
+	inc	r0
+	movx	@r0,a
+
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0b7h	; ... vdc
+
+	section setbackground
+	; Wait until end of current scan line to avoid changing
+	; the background in the middle of the screen (flickers).
+	mov	r1,#iram_palflag
+	mov	a,@r1
+	jnz	.pal
+
+	; NTSC timing
+	; prepare to set grid+background color
+	mov	r0,#iram_color2
+	mov	a,@r0			; get ground color
+	mov	r0,#vdc_color
+
+	rept	21
+	nop
+	endm
+
+	movx	@r0,a			; set background color
+	orl	P1,#080h		; set P17, ground is always dark
+	jmp	.end
+
+.pal	; PAL timing
+	; prepare to set grid+background color
+	mov	r0,#iram_color2
+	mov	a,@r0			; get ground color
+	mov	r0,#vdc_color
+
+	rept 6
+	nop
+	endm
+
+	movx	@r0,a			; set background color
+	orl	P1,#080h		; set P17, ground is always dark
+.end	endsection setbackground
+
+	mov	r1,#vdc_control		; control register
+	movx	a,@r1			; get old value
+	anl	a,#0ffh - vdc_ctrl_fore	; char+sprite off
+	movx	@r1,a			; foreground off into vdc_control
+
+	; show score
+	mov	r0,#vdc_char6
+	mov	r3,#SCOREX
+	mov	r4,#SCOREY
+	mov	r6,#col_chr_white
+	mov	r1,#eram_scoreh
+	call	showscore
+
+	IFDEF DEBUG_RASTER
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black | col_grd_white
+	movx	@r0,a
+	ENDIF
+
+	; start gfx again
+	mov	r0,#vdc_control		; control register
+	movx	a,@r0
+	orl	a,#vdc_ctrl_fore	; char+sprite on
+	movx	@r0,a
+
+	; restore R3-R6
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_r3
+	movx	a,@r0
+	mov	r3,a
+	dec	r0
+	movx	a,@r0
+	mov	r4,a
+	dec	r0
+	movx	a,@r0
+	mov	r5,a
+	dec	r0
+	; The value stored here is the old P1 before the interrupt and will be
+	; put back into P1 at the end of the normal interrupt routine. So I
+	; have to transfer the current P17 into this value.
+	movx	a,@r0
+	anl	a,#07fh			; clear old P17
+	mov	r6,a
+	in	a,P1
+	anl	a,#080h			; mask out new P17
+	orl	a,r6			; combine with rest of old P1
+	mov	r6,a
+
+	jmp	015h			; restore A/P1 and retr by BIOS routine
+
+; On second raster irq I set a flag which marks the start of a drawframe.
+.second
+	; SCORE: is fully displayed, set flag to draw targets in gameplay
+	orl	a,#ictrl_bottom | ictrl_second
+	mov	@r0,a			; set flags
+
+	IFDEF DEBUG_RASTER
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	mov	r0,#vdc_color
+	mov	a,#col_bck_green | col_grd_white
+	movx	@r0,a
+	ENDIF
+
+	jmp	014h			; restore A/P1 and retr by BIOS routine
+	endsection lineirq
+
+; show the current score
+showscore section showscore
+; Input:
+;  R0 pointer to first char to use for display
+;  R1 pointer to highest byte of score in eram
+;  R3 x position
+;  R4 y position
+;  R6 color
+; Destroy:
+;  R2 R7
+	mov	r7,#3			; 3 bytes to display
+.loop2	mov	r2,#1			; low/high nibble flag
+.loop1	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	movx	a,@r1
+	; tricky djnz usage: R2=1 for high nibble, R2=0 for low nibble
+	djnz	r2,.noswap
+	swap	a			; move high nibble to low
+.noswap	anl	a,#00fh			; mask out nibble
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	mov	r5,a
+	mprintchar			; macro, inserts most of printchar
+	; advance x position
+	mov	a,r3
+	add	a,#8
+	mov	r3,a
+	; R2 here: R2=0 for high nibble, R2=0ffh for low nibble
+	mov	a,r2			; check nibble flag
+	jz	.loop1			; repeat loop if high nibble
+	inc	r1			; next score byte
+	djnz	r7,.loop2		; until all bytes done
+	ret
+	endsection showscore
+
+; show the current score
+;** called from bank 1
+showscoreb1
+	call	showscore
+	jmp	switchmb0_1
+
+; show the current score
+;** called from bank 2
+showscoreb2
+	call	showscore
+	jmp	switchmb0_2
+
+mysoundirq section tuneplay
+	; check if BIOS sound or custom sound
+	mov	a,r4
+	add	a,#08ah		; >= 076h
+	jc	.custom
+	jmp	soundirq	; BIOS tune
+
+.custom	; custom sound handler, read sound opcodes from current page
+	mov	a,r4
+	movp	a,@a
+	mov	r1,a		; command byte
+	inc	r4
+	mov	a,r4
+	movp	a,@a
+	mov	r2,a		; parameter byte
+	jmp	parsesnd	; let BIOS sound IRQ handle opcode
+	endsection tuneplay
+
+;FREE: 020h
+
+	org	0676h
+
+tune_levelwin
+	db	086h, 010h
+	db	021h
+	db	086h, 014h
+	db	021h
+	db	086h, 010h
+	db	021h
+	db	086h, 014h
+	db	021h
+	db	086h, 018h
+	db	021h
+	db	086h, 014h
+	db	021h
+	db	086h, 018h
+	db	021h
+	db	086h, 01ch
+	db	021h
+	db	086h, 01ch
+	db	021h
+	db	08ah, 018h
+	db	021h, 0
+
+tune_alienkill
+	db	046h, 0dfh
+	db	048h, 0dah
+	db	046h, 0deh
+	db	048h, 0d8h
+	db	046h, 0dah
+	db	044h, 0d4h
+	db	021h, 0
+
+tune_shotkill
+	db	048h, 0ffh
+	db	046h, 0fbh
+	db	044h, 0f7h
+	db	042h, 0f3h
+	db	021h, 0
+
+tune_bonusbeep
+	db	082h, 024h
+	db	021h, 0
+
+tune_powerbeep
+	db	088h, 018h
+	db	084h, 024h
+	db	021h, 0
+
+tune_powerend
+	db	088h, 024h
+	db	084h, 018h
+	db	021h, 0
+
+tune_shieldempty
+	db      04ah, 0ffh
+	db      046h, 0fah
+	db      044h, 0f3h
+	db      04ch, 0dch
+	db      048h, 0d8h
+	db      044h, 0d4h
+	db      048h, 0d8h
+	db      044h, 0d4h
+	db	021h, 0
+
+tune_levelempty
+	db	044h, 0ffh
+	db	021h
+	db	044h, 0ffh
+	db	04ah, 0dfh
+	db	047h, 0ddh
+	db	045h, 0dah
+	db	042h, 0d3h
+
+	db	021h, 0
+
+tune_gameover
+	db	08ah, 01ch
+	db	088h, 018h
+	db	088h, 014h
+	db	08ah, 018h
+	db	088h, 014h
+	db	088h, 010h
+	db	08ah, 014h
+	db	088h, 010h
+	db	088h, 00ch
+	db	08ch, 008h
+	db	021h, 0
+
+	shared	tune_levelwin
+	shared	tune_alienkill
+	shared	tune_shotkill
+	shared	tune_bonusbeep
+	shared	tune_powerbeep
+	shared	tune_powerend
+	shared	tune_shieldempty
+	shared	tune_gameover
+	shared	tune_levelempty
+
+	assert "lo(tune_levelwin) >= 076h"
+	assert "hi(mysoundirq) == hi($)"
+
+	org	06ffh
+
+; Set sprite shape, this has to be in the same bank as the irq,
+; SEL MBx does not work in IRQs.
+; Input
+;  A shape to set
+;  R0 target sprite
+; Alters
+;  R2 ROM pointer
+;  R7 loop counter
+setshp	section setshape
+	rl	a
+	rl	a
+	rl	a
+	add	a,#lo(shapedata)
+	mov	r2,a
+	mov	r7,#8
+.loop	mov	a,r2
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r2
+	djnz	r7,.loop
+	ret
+	endsection setshape
+
+shapedata
+	; 0-3: alien 1, ALN_UFO
+	include	"ufo.i"
+
+	; 4-7: alien 2, ALN_DISC
+	include	"disc.i"
+
+	; 8-11: alien 3, ALN_BOMBER
+	include	"bomber.i"
+
+	; 12-15: alien 4 ALN_RANDOM
+	include	"antenna.i"
+
+	; 16-19: alien 5 ALN_ATTACK
+	include	"double.i"
+
+	; 20-23: alien 6 ALN_BOOMERANG
+	include "boomerang.i"
+
+	; 24: explosion 0
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00101000b
+	db	00010000b
+	db	00101000b
+	db	00000000b
+	db	00000000b
+	; 25: explosion 1
+	db	00000000b
+	db	00000000b
+	db	01001000b
+	db	00100100b
+	db	01010000b
+	db	00000100b
+	db	01010000b
+	db	00000000b
+	; 26: explosion 2
+	db	10000010b
+	db	00101000b
+	db	01000100b
+	db	00010010b
+	db	01001000b
+	db	00010010b
+	db	10000000b
+	db	00100100b
+	; 27: explosion 3
+	db	10000010b
+	db	00100000b
+	db	00000000b
+	db	00000010b
+	db	01000000b
+	db	00000010b
+	db	10000000b
+	db	00100100b
+
+	assert "hi(shapedata) == hi($)"
+
+; here starts bank0 MB1 ------------------------------------------------------
+
+	org	0800h			; bank0/mb1
+
+	include	"switchmb1.h"		; bank switch table for mb1
+
+	org	084ch
+
+;## draw target field
+;** called from bank3
+drawtargets section drawtargets
+	; always draw extra section
+	mov	r0,#iram_level		; level
+	mov	a,@r0
+	add	a,#lo(.extratab)
+	movp	a,@a			; get data from table
+	mov	r3,a
+	call	drawlevel
+
+	; only draw normal section when dirty flag set
+	mov	r0,#iram_ictrl
+	mov	a,@r0
+	jb5	.draw
+	jmp	switchmb1_3
+.draw	; dirty flag set, draw it
+	mov	r0,#iram_level		; level
+	mov	a,@r0
+	add	a,#lo(.normaltab)
+	movp	a,@a			; get data from table
+	mov	r3,a
+	call	drawlevel
+	call	copyxpos_chars
+	call	copyxpos_quads
+	jmp	switchmb1_3
+
+.extratab
+	db	lo(targetextra_1)
+	db	lo(targetextra_2)
+	db	lo(targetextra_3)
+	db	lo(targetextra_4)
+	db	lo(targetextra_5)
+	db	lo(targetextra_6)
+	db	lo(targetextra_7)
+
+.normaltab
+	db	lo(target_1)
+	db	lo(target_2)
+	db	lo(target_3)
+	db	lo(target_4)
+	db	lo(target_5)
+	db	lo(target_6)
+	db	lo(target_7)
+
+	assert "hi(drawtargets) == hi($-1)"
+
+	endsection drawtargets
+
+drawlevel section drawlevel
+.loop	mov	r1,#iram_level
+	mov	a,@r1
+	mov	r1,a			; current level
+	call	gettarget
+	jnz	.noend
+	ret
+.noend	; get target value
+	mov	r1,a			; target variable
+	orl	P1,#03ch
+	anl	P1,#0afh		; extram
+	movx	a,@r1			; target value
+	mov	r7,a
+	orl	P1,#03ch
+	anl	P1,#0b7h		; vdc
+	mov	r1,#iram_level
+	mov	a,@r1
+	mov	r1,a			; current level
+	; get destination and length info into (r5,r4)
+	mov	r0,#01dh		; @r5, address of register R5' in iram
+	mov	r2,#2			; 2 registers
+	call	copyitarget
+	mov	r2,a			; copy length for copy counter
+	; check which dataset to draw
+	mov	a,r7			; target value
+	jnz	.copy
+	; target var is 0, skip to 2nd dataset
+	mov	a,r3			; ROM pointer
+	add	a,r4			; length
+	mov	r3,a
+.copy	; copy bytes
+	mov	a,r5
+	mov	r0,a			; destination
+	call	copyetarget
+	; check which dataset was drawn
+	mov	a,r7			; target value
+	jnz	.skp2nd
+	jmp	.loop
+.skp2nd	; first dataset was drawn, skip to next entry
+	mov	a,r3			; ROM pointer
+	add	a,r4			; length
+	mov	r3,a
+	jmp	.loop
+
+	endsection drawlevel
+
+; call copyetargetx routine matching current level
+; copy data from target structure into eram
+copyetarget section copyetarget
+; Input
+;  R0: destination in iram
+;  R1: current level
+;  R3: pointer to ROM
+;  R2: length
+; Output
+;  R3: next pointer to ROM
+	mov	a,r1
+	add	a,#lo(copyetable)
+	jmpp	@a
+
+copyetable
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+	db	lo(.to4)
+	db	lo(.to5)
+	db	lo(.to6)
+	db	lo(.to7)
+.to1	jmp	copyetarget_1
+.to2	jmp	copyetarget_2
+.to3	jmp	copyetarget_3
+.to4	jmp	copyetarget_4
+.to5	jmp	copyetarget_5
+.to6	jmp	copyetarget_6
+.to7	jmp	copyetarget_7
+
+	assert "hi(copyetarget) == hi($-1)"
+
+	endsection copyetarget
+
+; call copyitargetx routine matching current level
+; copy data from target structure into iram, descending order
+copyitarget section copyitarget
+; Input
+;  R0: destination in iram
+;  R1: current level
+;  R3: pointer to ROM
+;  R2: length
+; Output
+;  R3: next pointer to ROM
+	mov	a,r1
+	add	a,#lo(copyitable)
+	jmpp	@a
+
+copyitable
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+	db	lo(.to4)
+	db	lo(.to5)
+	db	lo(.to6)
+	db	lo(.to7)
+.to1	jmp	copyitarget_1
+.to2	jmp	copyitarget_2
+.to3	jmp	copyitarget_3
+.to4	jmp	copyitarget_4
+.to5	jmp	copyitarget_5
+.to6	jmp	copyitarget_6
+.to7	jmp	copyitarget_7
+
+	assert "hi(copyitarget) == hi($-1)"
+
+	endsection copyitarget
+
+; --- target data for first level --------------------------------------------
+
+	org	0900h
+
+	targetaccess forest
+
+target_forest
+	forest	eram_targets, 026h, vdc_quad0
+	forest	eram_targets+4, 066h, vdc_quad2
+	tree	eram_targets+8, 007h, vdc_char4
+	house	eram_targets+9, 012h, vdc_char0, white
+	db	0
+
+targetextra_forest
+	db	0
+
+	assert "hi(target_forest) == hi($)"
+
+; call gettargetx routine matching current level
+; get single byte from target structure
+; Input
+;  R1: current level
+;  R3: pointer to ROM
+; Output
+;  A:  value
+;  R3: next pointer to ROM
+gettarget section gettarget
+	mov	a,r1
+	add	a,#lo(targettable)
+	jmpp	@a
+
+targettable
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+	db	lo(.to4)
+	db	lo(.to5)
+	db	lo(.to6)
+	db	lo(.to7)
+.to1	jmp	gettarget_1
+.to2	jmp	gettarget_2
+.to3	jmp	gettarget_3
+.to4	jmp	gettarget_4
+.to5	jmp	gettarget_5
+.to6	jmp	gettarget_6
+.to7	jmp	gettarget_7
+	endsection gettarget
+
+	org	09e5h
+
+; Copy the x positions from the quads into the eram_charquadx array.
+; NOTE: The copyxpos routines copy the x positions of all chars and quads
+; which form the target objects into the eram_charquadx array. This array
+; is used by the ALN_ATTACK alien to shoot at targets. The routine is split
+; into 2 parts, because only so it can be squeezed into some free ROM
+; space. This here is part 1 of the routine.
+copyxpos_chars section copyxpos_chars
+	; copy char positions
+	mov	r0,#vdc_char0
+	mov	r1,#eram_charquadx
+	mov	r2,#8			; only 8 chars used for targets
+.loop	movx	a,@r0			; y position of target
+	inc	r0
+	xrl	a,#SCOREY		; compare with score position
+	mov	r3,#0
+	jz	.skip0			; char unused in _extra, just the score
+	movx	a,@r0
+	mov	r3,a			; x position of target
+.skip0	inc	r0
+	inc	r0
+	xrl	a,#0f8h
+	jnz	.skip1
+	mov	r3,#0			; unused target, clear x pos
+.skip1	movx	a,@r0			; byte 3 of char
+	anl	a,#00eh			; mask out color
+	jnz	.skip2
+	mov	r3,#0			; black target, clear x pos
+.skip2	mov	a,r3
+	orl	P1,#03ch
+	anl	P1,#0afh		; extram
+	movx	@r1,a			; store x pos in eram_charquadx
+	orl	P1,#03ch
+	anl	P1,#0b7h		; vdc
+	inc	r0
+	inc	r1
+	djnz	r2,.toloop
+	ret
+	; ugly, but necessary due to page break
+.toloop	jmp	.loop
+	endsection copyxpos_chars
+
+; --- target data for street level ---------------------------------------------
+
+	org	0a1ah			; make space for copyxpos_chars routine
+
+	targetaccess street
+
+target_street
+	lantern eram_targets, 020h, vdc_char0, blue, cyan
+	cars eram_targets+1, 040h, vdc_quad0, white, red, green, blue
+	db	0
+
+targetextra_street
+	lantern eram_targets+4, 080h, vdc_char4, blue, cyan
+	db	0
+
+	assert "hi(target_street) == hi($)"
+
+; --- target data for pyramid level ------------------------------------------
+
+	org	0b00h
+
+	targetaccess pyramid
+
+target_pyramid
+	pyramid	eram_targets, 010h, vdc_quad0, vdc_char0, yellow
+	db	0
+
+targetextra_pyramid
+	db	0
+
+	assert "hi(target_pyramid) == hi($)"
+
+; Copy the x positions from the quads into the eram_charquadx array.
+; This is supposed to be called directly after copyxpos_chars.
+; NOTE: The copyxpos routines copy the x positions of all chars and quads
+; which form the target objects into the eram_charquadx array. This array
+; is used by the ALN_ATTACK alien to shoot at targets. The routine is split
+; into 2 parts, because only so it can be squeezed into some free ROM
+; space. This here is part 2 of the routine.
+copyxpos_quads section copyxpos_quads
+	; copy quad positions, only x position is in first quad
+	mov	r0,#vdc_quad0
+	mov	r2,#4			; 4 quads
+.loop1	movx	a,@r0			; y position of quad
+	xrl	a,#0f8h
+	jnz	.skip1
+	; clear all 4 positions
+	orl	P1,#03ch
+	anl	P1,#0afh		; extram
+	mov	r3,#4
+.loop3	movx	@r1,a
+	inc	r1
+	djnz	r3,.loop3
+	orl	P1,#03ch
+	anl	P1,#0b7h		; vdc
+	mov	a,r0
+	add	a,#010h			; to next quad
+	mov	r0,a
+	djnz	r2,.loop1		; quad loop
+	ret
+
+.skip1	inc	r0
+	movx	a,@r0			; x position of first sub-quad
+	mov	r5,a
+	mov	r3,#4			; 4 sub-quads in a quad
+.loop2	mov	a,r5
+	mov	r4,a			; x position of current sub-quad
+	inc	r0
+	inc	r0
+	movx	a,@r0			; byte 3 of char
+	anl	a,#00eh			; mask out color
+	jnz	.skip2
+	mov	r4,#0			; black target, clear x pos
+.skip2	mov	a,r4
+	orl	P1,#03ch
+	anl	P1,#0afh		; extram
+	movx	@r1,a			; store x pos in eram_charquadx
+	orl	P1,#03ch
+	anl	P1,#0b7h		; vdc
+	inc	r0
+	inc	r0
+	inc	r1
+	mov	a,r5
+	add	a,#010h
+	mov	r5,a			; next sub-quad x position
+	djnz	r3,.loop2		; sub-quad loop
+	dec	r0
+	djnz	r2,.loop1		; quad loop
+	ret
+	endsection copyxpos_quads
+
+; --- target data for water level --------------------------------------------
+
+	org	0c01h
+
+	targetaccess water
+
+target_water
+	island eram_targets, 028h, vdc_quad0, vdc_char0, yellow, white, white, white
+	minisub eram_targets+4, 010h, vdc_char1, cyan
+	db	0
+
+targetextra_water
+	minisub eram_targets+5, 088h, vdc_char4, green
+	db	0
+
+	assert "hi(target_water) == hi($)"
+
+; --- target data for ice level ----------------------------------------------
+
+	org	0d00h
+
+	targetaccess ice
+
+target_ice
+	castle	eram_targets, 020h, vdc_char0, vdc_quad0, white
+	vans1	eram_targets+1, 060h, vdc_quad2, white, cyan, cyan, cyan
+	db	0
+
+targetextra_ice
+	vans2	eram_targets+1, 060h, vdc_char5, cyan, cyan, cyan
+	db	0
+
+	assert "hi(target_ice) == hi($)"
+
+; --- target data for train level ---------------------------------------------
+
+	org	0e00h
+
+	targetaccess train
+
+target_train
+	train	eram_targets, vdc_char0, vdc_quad0, yellow, blue
+	db	0
+
+targetextra_train
+	traine	eram_targets, vdc_char6, yellow
+	db	0
+
+; --- target data for moon level ---------------------------------------------
+
+	org	0f00h
+
+	targetaccess moon
+
+target_moon
+	spaceport eram_targets, vdc_quad0, cyan, blue
+	spaceship eram_targets+1, 060h, vdc_char0, vdc_quad3, cyan, blue
+	db	0
+
+targetextra_moon
+	spaceshipe eram_targets+1, 060h, vdc_char6, blue
+
+	db	0
+
+	org	0fe8h
+
+	db	0, "$Revision: 1.185 $", 0
+
+	end

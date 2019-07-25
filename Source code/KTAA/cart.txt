@@ -1,0 +1,75 @@
+To create a KTAA cartridge it is necessary to open any old Videopac or
+Odyssey^2 cartridge and replace the ROM. You can either build a completely
+new PCB (see http://soeren.informationstheater.de/g7000/cart.html) or reuse
+the old one after removing the screening metal and ROM.
+
+How to create a KTAA cart from an old Videopac 2K game:
+
+I assume in this text here that you have some knowledge about EPROMs and
+how they are connected to Processors. KTAA does use all address lines
+available, so you have to reroute some pins (commercial carts leave out
+A10). The EPROM also has more pins than the ROMs used in commercial carts,
+but most of the pins are compatible.
+
+How to burn the 27C128 EPROM from the O2EM rom file:
+KTAA needs all available address space, so it can't just leave 1K per bank
+unused as most commercial games do. The commercial games leave out A10 of
+the processor, so that the ROM is mirrored. To use the full address space
+all address lines of the processor have to be connected 1:1. This also
+means that the lower 1K of every bank is unaccessable as the internal BIOS
+sits there. So to convert the 12K O2EM image to a 16K EPROM file you have to
+insert 1K empty space before every 3K. So the memory map of the EPROM looks
+like:
+
+0000h-03ffh empty
+0400h-0fffh first 3K block from O2EM image file
+1000h-13ffh empty
+1400h-1fffh second 3K block from O2EM image file
+2000h-23ffh empty
+2400h-2fffh third 3K block from O2EM image file
+3000h-33ffh empty
+3400h-3fffh last 3K block from O2EM image file
+
+Cart Slot pinout numbering, looking into the slot on the machine:
+Back row:  A  B  C  D  E  F  G  H  J  K  L  M  N  P  R (I and O not used)
+Front row: 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+
+How to connect the 27C128 EPROM to the Videopac / O^2:
+ 1 VCP	D
+ 2 A12	13
+ 3 A7	N
+ 4 A6	P
+ 5 A5	M
+ 6 A4	L
+ 7 A3	K
+ 8 A2	J
+ 9 A1	H
+10 A0	G
+11 D0	2
+12 D1	3
+13 D2	4
+14 GND	C
+15 D3	5
+16 D4	6
+17 D5	7
+18 D6	8
+19 D7	9
+20 /CE	C
+21 A10	10
+22 /G	F
+23 A11	14
+24 A9	15
+25 A8	R
+26 A13	12
+27 /PGM	D
+28 VCC	D
+
+Cart slot pin B must not be connected for KTAA, otherwise there is no black
+border around the ground on Videopac+ machines. On most carts (all that
+don't use The Voice) pin B is connected to pin C.
+
+On the Videopac 1 pcb which I converted I had to reroute the EPROM pins
+1, 2, 21, 23, 26, 27, 28.
+
+Don't use sockets on ceramic EPROMS, they are too high, the enclosure will
+not fit any more.

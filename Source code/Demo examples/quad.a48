@@ -1,0 +1,112 @@
+; Show quad cut off.
+
+; Version 1.0
+
+; $Id: quadcut.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; This programs demonstrates that the quad drawing is controlled by the last
+; char in the quad.
+;
+; The quad in the top row is cut down to 2 lines by the full block in the
+; last char, the other 3 chars show a filled triangle block 038h with different
+; start positions.
+; 
+; The quad in the bottom row is displayed in full height by showing a full
+; block as last char. The other 3 chars show the slash 02eh with different
+; start positions. The display of these 3 chars does not stop at char end,
+; the display wraps around and shows the full block which is char 02fh.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is ugly, badly commented, unsupported code!
+
+	cpu	8048
+
+	org	400h
+	
+	include	"g7000.h"
+	include	"bitfuncs.inc"	; part of asl distribution
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	call	gfxoff
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(text0)
+	call	setquad
+	mov	r0,#vdc_quad1
+	mov	r1,#lo(text1)
+	call	setquad
+	call	gfxon
+stop	jmp	stop
+
+; Input: r0 quad, r1 pointer to text
+setquad section setquad
+; NOTE:
+; This routine copies a ROM table into a quad, all 4 chars are set. It copies
+; 4 bytes, position and contents of the first sub-quad and then only fills
+; in the contents for the next 3 sub-quads, the position data is skipped as
+; it is not used.
+	mov	r2,#4
+	mov	r3,#4
+.loop0	mov	a,r1
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	djnz	r2,.loop0
+	inc	r0
+	inc	r0
+	mov	r2,#2
+	djnz	r3,.loop0
+	ret
+	endsection setquad
+
+	codepage videopac
+
+text0	
+	db	020h, 020h
+	db	lo(038h*8-010h), col_chr_white|hi(038h*8-010h)
+	db	lo(038h*8+2-010h), col_chr_white|hi(038h*8+2-010h)
+	db	lo(038h*8+4-010h), col_chr_white|hi(038h*8+4-010h)
+	db	lo(02fh*8+5-010h), col_chr_white|hi(02fh*8+5-010h)
+
+text1
+	db	040h, 020h
+	db	lo(02eh*8+2-020h), col_chr_white|hi(02eh*8+2-020h)
+	db	lo(02eh*8+4-020h), col_chr_white|hi(02eh*8+4-020h)
+	db	lo(02eh*8+6-020h), col_chr_white|hi(02eh*8+6-020h)
+	db	lo(02fh*8-020h), col_chr_white|hi(02fh*8-020h+0)
+
+	end

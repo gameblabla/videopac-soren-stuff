@@ -1,0 +1,292 @@
+; joystick demonstration for the G7000 by Soeren Gust
+; Version 1.3
+;
+; History:
+; Version 1.3
+;   The 8048 does not have a Z flag, jz jumps if A=0. So 2 orls were not
+;   necessary.
+;
+; Version 1.2
+;   more symbolic names from g7000.h
+;
+; Version 1.1
+;   after changing the shape, i didn't update iram_shape
+;   iram_shape gets initialised to 0ffh, so i was setting the shape everytime
+;
+; Version 1.0
+;   first release
+;
+; This program demonstrates the use of the joystick routines in the g7000
+; bios. It also shows how to use the sprite registers. It displays a dot
+; which you can move around with the joystick. While moving the dot changes
+; into an arrow pointing into the direction it moves. If you press fire it
+; doubles its size.
+
+; Copyright (C) 1997 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+; some variables in internal ram
+
+iram_xl		equ	020h		; bit 0-7 of x position
+iram_xh		equ	021h		; bit 8 of y position
+iram_y		equ	022h		; y position
+iram_colctrl	equ	023h		; color/control
+iram_shape	equ	024h		; last shape
+
+	org	400h
+	
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	call	gfxon		; turn gfx on
+
+	; initialise internal variables
+	mov	r0,#iram_xl
+	mov	a,#0a0h
+	mov	@r0,a
+	mov	r0,#iram_xh
+	mov	a,#0
+	mov	@r0,a
+	mov	r0,#iram_y
+	mov	a,#080h
+	mov	@r0,a
+	mov	r0,#iram_shape
+	mov	a,#0ffh
+	mov	@r0,a
+
+loop
+	call	waitvsync	; execute only once per frame
+	mov	r1,#0		; joystick 0
+	call	getjoystick	; get offsets
+
+	; test, if fire
+	mov	r1,#iram_colctrl
+	mov	a,#col_spr_white | spr_double
+	jf0	firepressed	; fire ?
+	mov	a,#col_spr_white
+firepressed
+	mov	@r1,a		; store color/control
+
+	call	decodejoystick	; get direction from offsets
+	call	extramenable	; enable extram
+	mov	r0,#07fh	; start of table
+
+	; test, if joystick is in neutral position
+	mov	a,r2		; x-offset
+	jnz	shapetest	; left/right
+
+	mov	a,r3		; y-offset
+	jnz	shapetest	; up/down
+
+	mov	r1,#8		; shape: neutral
+
+shapetest
+	; test, if shape has change since last frame
+	mov	a,r1		; we need r1 as pointer
+	mov	r7,a		; so put contents into r7
+	mov	r1,#iram_shape	; last shape
+	mov	a,@r1		; get it
+	xrl	a,r7		; compare
+	jz	setpos		; no need to set shape, skip that part
+
+	; set new value of iram_shape
+	mov	a,r7		; the number of the shape
+	mov	@r1,a		; put into iram_shape
+
+	; init table to copy shape data
+	mov	a,#8		; copy 8 bytes
+	movx	@r0,a
+	dec	r0
+	mov	a,#vdc_spr0_shape
+	movx	@r0,a
+	dec	r0
+
+	; now copy the data
+	mov	a,r7		; number of shape
+	rl	a
+	rl	a
+	rl	a		; 3*rl = a*8
+	add	a,#spritedata & 0ffh
+	mov	r1,a		; start of shape data
+	mov	r7,#8		; 8 bytes
+copyspriteloop:
+	mov	a,r1
+	movp	a,@a		; get byte
+	movx	@r0,a		; store in table
+	dec	r0
+	inc	r1
+	djnz	r7,copyspriteloop
+
+setpos
+	; adjust sprite positions in iram
+	; y is simple
+	mov	r1,#iram_y	; y position
+	mov	a,@r1		; get it
+	add	a,r3		; add offset
+	mov	@r1,a		; store y postion
+
+	; x is a 9 bit add using carry, we need to expand r2 to 9 bit also
+	mov	r1,#iram_xl	; low byte of x
+	mov	a,@r1		; get it
+	add	a,r2		; add offset, sets carry if necessary
+	mov	@r1,a		; store low byte of x
+	mov	r1,#iram_xh	; high bit of x
+	mov	a,@r1		; get it
+	addc	a,#0		; add the carry
+	mov	r7,a		; we need this later
+	mov	a,r2		; get offset
+	rr	a		; reuse bit 1 of offset as bit 8
+				; we need it, because we are dealing with
+				; 2s complement if R2=-1=01ffh
+	add	a,r7		; add result from above to bit 8 of offset
+	anl	a,#001h		; we only need 1 bit
+	mov	@r1,a		; store it as high bit
+
+	; prepare table for sprite positions
+	mov	a,#3		; copy 3 bytes
+	movx	@r0,a
+	dec	r0
+	mov	a,#vdc_spr0_ctrl
+	movx	@r0,a
+	dec	r0
+
+	; set sprite positions from iram using table
+	mov	r1,#iram_y	; y position
+	mov	a,@r1		; get it
+	movx	@r0,a		; put it into table
+	dec	r0
+
+	; x position: recombine xh and xl and split it into 8-1/0
+	mov	r1,#iram_xh	; highest bit of x position
+	mov	a,@r1
+	rrc	a		; highest bit of sprite_x into carry
+	mov	r1,#iram_xl	; low byte of x positon
+	mov	a,@r1
+	rrc	a		; lowest bit into carry, highest bit into 7
+	movx	@r0,a		; put bit 8-1 of sprite_x into sprite control 1
+	dec	r0
+	mov	a,#0		; we only need carry (lowest bit of sprite_x)
+	rlc	a		; lowest bit of sprite_x into bit 0
+	mov	r7,a		; store in r7
+	mov	r1,#iram_colctrl; color/control
+	mov	a,@r1		; get it
+	orl	a,r7		; put it together
+	movx	@r0,a		; put it into sprite control 2 via table
+	dec	r0
+
+	call	tableend	; thats all
+
+	jmp	loop
+
+	; the shapes of the sprite
+	; the images are mirrored on the y axis, the VDC prints them on
+	; screen that way, so the first shape is the shape for right!!
+spritedata:
+	db	00000000b
+	db	00110000b
+	db	01100000b
+	db	11111111b
+	db	11111111b
+	db	01100000b
+	db	00110000b
+	db	00000000b
+
+	db	11111000b
+	db	11100000b
+	db	11110000b
+	db	10111000b
+	db	10011100b
+	db	00001110b
+	db	00000111b
+	db	00000010b
+
+	db	00011000b
+	db	00111100b
+	db	01111110b
+	db	01011010b
+	db	00011000b
+	db	00011000b
+	db	00011000b
+	db	00011000b
+
+	db	00011111b
+	db	00000111b
+	db	00001111b
+	db	00011101b
+	db	00111001b
+	db	01110000b
+	db	11100000b
+	db	01000000b
+
+	db	00000000b
+	db	00001100b
+	db	00000110b
+	db	11111111b
+	db	11111111b
+	db	00000110b
+	db	00001100b
+	db	00000000b
+
+	db	01000000b
+	db	11100000b
+	db	01110000b
+	db	00111001b
+	db	00011101b
+	db	00001111b
+	db	00000111b
+	db	00011111b
+
+	db	00011000b
+	db	00011000b
+	db	00011000b
+	db	00011000b
+	db	01011010b
+	db	01111110b
+	db	00111100b
+	db	00011000b
+
+	db	00000010b
+	db	00000111b
+	db	00001110b
+	db	10011100b
+	db	10111000b
+	db	11110000b
+	db	11100000b
+	db	11111000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00011000b
+	db	00011000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	end

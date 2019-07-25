@@ -1,0 +1,169 @@
+; Find out if running on PAL or NTSC
+
+; Version 1.0
+
+; $Id: palntsc.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; This program checks the length of the VBLANK pulse. This pulse is much longer
+; on PAL machines.
+
+; This is based on an idea from Ren� van den Enden.
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+;
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+	org	400h
+	
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start	
+	; wait for end of keyclick
+	mov	r0,#iram_irqctrl
+	mov	a,@r0
+	jb6	start
+
+	call	waitvsync	; wait until vsync
+
+	; count until pulse ends
+count	clr	a		; init counter
+loop	inc	a
+	jz	error		; counter overflow
+	nop			; prevent overflow on PAL
+	nop
+	nop
+	jt1	loop
+error	mov	r1,a
+
+show	; show result, PAL: D6, NTSC: 34
+	call	waitvsync
+	call	gfxoff
+
+	; set colors
+	mov	a,#col_bck_black
+	mov	r0,#vdc_color
+	movx	@r0,a
+
+	; print result in hex
+	mov	r0,#vdc_char0
+	mov	r3,#020h
+	mov	r4,#070h
+	mov	r6,#col_chr_white
+	mov	a,r1
+	call	displayhex
+
+	; print result as string
+	mov	a,r1		; 0ceh-0deh is PAL
+	add	a,#021h		; 0efh-0ffh is PAL
+	add	a,#011h		; set carry if PAL
+	jc	printpal
+
+	mov	a,r1		; 02ah-03ah is NTSC
+	add	a,#0c5h		; 0efh-0ffh is NTSC
+	add	a,#011h		; set carry if NTSC
+	jc	printntsc
+
+	; unknown machine, print ?
+	mov	r0,#vdc_char2
+	mov	r1,#unknown & 0ffh
+	mov	r3,#038h
+	mov	r4,#070h
+	call	printstr
+	jmp	next
+
+printpal
+	mov	r0,#vdc_char2
+	mov	r1,#pal & 0ffh
+	mov	r3,#038h
+	mov	r4,#070h
+	call	printstr
+	jmp	next
+
+printntsc
+	mov	r0,#vdc_char2
+	mov	r1,#ntsc & 0ffh
+	mov	r3,#038h
+	mov	r4,#070h
+	call	printstr
+
+next	call	gfxon
+
+	call	waitforkey
+
+	jmp	start
+
+displayhex
+; r0=charpointer r3=x, r4=y, r6=color a=number
+; alters r7
+	mov	r7,a
+	swap	a
+	anl	a,#00fh
+	call	displayhexnibble
+	mov	a,r7
+	anl	a,#00fh
+	call	displayhexnibble
+	ret
+
+displayhexnibble
+; r0=charpointer r3=x, r4=y, r6=color, a=number
+; alters r3, r5, a
+	add	a,#hextable & 0ffh
+	movp	a,@a
+	mov	r5,a
+	call	printchar
+	ret
+
+hextable:
+	db	0,1,2,3,4,5,6,7,8,9,020h,025h,023h,01ah,012h,01bh
+
+; Input: R0: first char R1: pointer to string, R3/R4 position
+printstr
+	mov	a,r1		; string starts with length byte
+	movp	a,@a		; get length
+	mov	r2,a		; into R2
+	inc	r1		; advance pointer
+loopps	mov	a,r1		; get pointer
+	movp	a,@a		; get char
+	mov	r5,a		; into the right register
+	inc	r1		; advance pointer
+	mov	r6,#col_chr_white
+	call	printchar	; print it
+	djnz	r2,loopps	; do it again
+	ret
+
+pal	db	3, 00fh, 020h, 00eh
+ntsc	db	4, 02dh, 014h, 019h, 023h
+unknown	db	1, 0dh
+
+	end

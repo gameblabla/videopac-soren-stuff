@@ -1,0 +1,150 @@
+; Read back char registers
+
+; Version 1.0
+
+; $Id: charread.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.0
+;   first release
+
+; This program shows that the char registers have a different meaning when
+; read back in gfxon (junk) than in gfxoff.
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is ugly, badly commented, unsupported code!
+
+	cpu	8048
+
+	org	400h
+	
+	include	"g7000.h"
+	include	"bitfuncs.inc"	; part of asl distribution
+
+iram_data	equ	020h
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	main		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+main
+	; print char
+	call	gfxoff
+	mov	r0,#vdc_char0
+	mov	r3,#010h
+	mov	r4,#010h
+	mov	r5,#02fh
+	mov	r6,#col_chr_white
+	call	printchar
+	call	gfxon
+	call	waitvsync
+	call	waitvsync
+
+	; read back data with gfx on
+	mov	r0,#vdc_char0
+	mov	r1,#iram_data
+	mov	r2,#4
+.lop0	movx	a,@r0
+	mov	@r1,a
+	inc	r0
+	inc	r1
+	djnz	r2,.lop0
+
+	call	gfxoff
+	call	waitvsync
+
+	; read back data with gfx off
+	mov	r0,#vdc_char0
+	mov	r2,#4
+.lop1	movx	a,@r0
+	mov	@r1,a
+	inc	r0
+	inc	r1
+	djnz	r2,.lop1
+
+	; print data, high nibble on
+	mov	r0,#vdc_quad0
+	mov	r1,#iram_data
+	mov	r2,#4
+	mov	r3,#010h
+	mov	r4,#028h
+.lop2	mov	a,@r1
+	swap	a
+	call	printnibble
+	inc	r1
+	djnz	r2,.lop2
+
+	; print data, low nibble on
+	mov	r0,#vdc_quad1
+	mov	r1,#iram_data
+	mov	r2,#4
+	mov	r3,#018h
+.lop3	mov	a,@r1
+	call	printnibble
+	inc	r1
+	djnz	r2,.lop3
+
+	; print data, high nibble off
+	mov	r0,#vdc_quad2
+	mov	r1,#iram_data+4
+	mov	r2,#4
+	mov	r3,#010h
+	mov	r4,#040h
+.lop4	mov	a,@r1
+	swap	a
+	call	printnibble
+	inc	r1
+	djnz	r2,.lop4
+
+	; print data, low nibble off
+	call	gfxoff
+	mov	r0,#vdc_quad3
+	mov	r1,#iram_data+4
+	mov	r2,#4
+	mov	r3,#018h
+.lop5	mov	a,@r1
+	call	printnibble
+	inc	r1
+	djnz	r2,.lop5
+	call	gfxon
+
+stop	jmp	stop
+
+printnibble
+	anl	a,#0fh
+	add	a,#lo(hextable)
+	movp	a,@a
+	mov	r5,a
+	call	printchar
+	ret
+
+hextable
+	db	0,1,2,3,4,5,6,7,8,9,020h,025h,023h,01ah,012h,01bh
+
+	end

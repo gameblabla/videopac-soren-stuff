@@ -1,0 +1,2514 @@
+; Kill the attacking aliens for the G7000 / G7400 by Soeren Gust
+;
+; $Id: ktaa_b1.a48,v 1.257 2003/12/04 22:48:26 sgust Exp $
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+; This is written for asl 1.41r8, see <http://www.alfsembler.de>. I use several
+; special features (macros, section) of asl, so using other assemblers
+; requires a lot of porting.
+
+	cpu	8048
+	page	0		; no page breaks in listings
+	macexp	off		; no macro expansions in listings
+	listing	noskipped	; only show active bank in listing
+
+BANK	equ	1		; current bank, needed for bankswitch macros
+
+	include	"g7000.h"
+	include	"charset.h"	; character set definition for g7000 chars
+	include	"bitfuncs.inc"	; part of asl distribution, see scoretext
+	include "common.h"	; variables, macros, defines
+	include "ktaa_b0.inc"	; tune definitions
+
+; here starts bank1 MB0 ------------------------------------------------------
+
+	org	0400h			; bank1/mb0
+
+	jmp	plusselectgame		; RESET, BIOS, not in this bank
+	jmp	irq			; interrupt, BIOS
+	jmp	lineirqentry		; timer: line irq
+	jmp	vsyncirq		; VSYNC-interrupt, standard
+	jmp	init7400		; after selectgame on VP+ 7400
+	jmp	mysoundirqentry		; custom tune player
+
+	db	"OPNB"			; marker for o2em means PIN B open
+
+; irq entry after bankswitching
+; there is no extra code in irqs used in this bank, it is outside the gameloop
+; to simplify bankswitching i leave dummy code here, see banks 0 and 3 for real
+
+myvsyncirqentry
+	retr
+	retr
+	retr
+	retr
+
+lineirqentry
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+	retr
+
+; The tune player may be used in this bank, switch to bank 0 for playing
+mysoundirqentry
+	anl	P1,#0fch		; switch to bank 0
+	nop				; there is a jump here in bank 0
+	nop
+
+	include	"switchmb0.h"		; bank switch table for mb0
+
+	org	0460h
+
+;## display title screen
+;** called from bank 3
+; Here I recycle some of the variables used in the gameplay kernel.
+; The smooth scrolling of the scrolltext is tricky: I cut of parts of the
+; scrolltext to the left and right by positioning 2 sprites there. But sprites
+; can't have the same color as the background so I have to put a filled grid
+; line there. This looks ugly on o2em <= 0.87 but works on real hardware.
+; It works even better on Videopac+ G7400, the bright black grid which forms
+; the background for the scrolltext still counts as black and gets transparent
+; together with the normal black background, but it is not used on the VP+,
+; there is another routine in bank2mb1 for that.
+titlescreen section titlescreen
+	; init joystick fire FSM
+	call	extramenable
+	mov	r0,#eram_joystate
+	clr	a
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a			; eram_joywait
+	mov	r0,#iram_alien1_t	; used to count full scrolltext runs
+	mov	@r0,a
+	; start drawing gfx
+	call	vdcenable
+	call	gfxoff
+	; draw P/N as PAL/NTSC marker
+	mov	r0,#vdc_charb
+	mov	r3,#090h
+	mov	r4,#028h
+	mov	r5,#02dh		; 'N'
+	mov	r6,#col_chr_white
+	mov	r1,#iram_palflag
+	mov	a,@r1
+	jz	.nopal
+	mov	r5,#00fh		; 'P'
+.nopal	IFDEF	DEBUG_PALNTSC
+	call	printchar
+	ELSE
+	nop
+	nop
+	ENDIF
+	; set grid fill mode
+	mov	r0,#vdc_control
+	movx	a,@r0
+	orl	a,#vdc_ctrl_fill
+	movx	@r0,a
+	; set grid to show grey background for scrolltext
+	mov	r0,#vdc_gridv0
+	mov	r2,#9
+	mov	a,#020h
+.grid	movx	@r0,a
+	inc	r0
+	djnz	r2,.grid
+	; set shape on first 2 sprites, same size as 1 grid line
+	mov	r0,#vdc_spr0_shape
+	mov	r1,#vdc_spr1_shape
+	mov	r2,#6
+	mov	a,#0ffh
+.setsh	movx	@r0,a
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	djnz	r2,.setsh
+	clr	a
+	movx	@r0,a
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	movx	@r0,a
+	movx	@r1,a
+	; position first 2 sprites left and right of scrolltext
+	mov	r0,#vdc_spr0_ctrl
+	mov	r1,#vdc_spr1_ctrl
+	mov	a,#090h
+	movx	@r0,a		; y
+	movx	@r1,a		; y
+	inc	r0
+	inc	r1
+	mov	a,#008h
+	movx	@r0,a		; x
+	mov	a,#090h
+	movx	@r1,a		; x
+	inc	r0
+	inc	r1
+	mov	a,#col_spr_black | spr_double
+	movx	@r0,a		; color
+	movx	@r1,a		; color
+	mov	r0,#iram_alien0_t
+	mov	@r0,#lo(scrolltext)	; start of scrolltext
+	mov	r0,#iram_alien0_x
+	mov	@r0,#017h		; first x position of text
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black | col_grd_lum
+	movx	@r0,a			; set colors
+.tloop	call	waitvsync
+	; prepare for mid screen update in 070h lines, without line interrupts
+	mov	a,#090h
+	mov	t,a
+	strt	cnt
+	call	gfxoff
+	; print "KILL THE"
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(killtext)
+	call	setquad
+	mov	r0,#vdc_quad1
+	call	setquad
+	; print "ATTACKING"
+	mov	r0,#vdc_char0
+	mov	r3,#018h
+	mov	r4,#044h
+	mov	r2,#009h
+	mov	r1,#lo(attackstr)
+	mov	r7,#col_chr_red
+	call	printstr
+	; print "ALIENS  "
+	mov	r0,#vdc_quad2
+	mov	r1,#lo(alientext)
+	call	setquad
+	mov	r0,#vdc_quad3
+	call	setquad
+	call	gfxon
+	; wait util "ALIENS" displayed
+.wait	mov	a,t
+	jnz	.wait
+	call	gfxoff
+	; show scrolltext
+	mov	r0,#iram_alien0_t
+	mov	a,@r0
+	mov	r2,a
+	mov	r0,#iram_alien0_x
+	mov	a,@r0
+	mov	r3,a
+	mov	r4,#096h
+	call	setscroll
+	call	gfxon
+	; advance x position of scrolltext
+	mov	r0,#iram_alien0_x
+	mov	a,@r0
+	dec	a
+	mov	@r0,a
+	xrl	a,#00fh			; next char reached
+	jnz	.nochar
+	; next char reached, set x position back
+	mov	@r0,#017h
+	; advance text pointer
+	mov	r0,#iram_alien0_t
+	mov	a,@r0
+	inc	a
+	mov	@r0,a
+	; test for end of text
+	xrl	a,#lo(scrollend)
+	jnz	.nochar
+	mov	@r0,#lo(scrolltext)
+	; count number of resets, call gameover every 3 runs
+	mov	r0,#iram_alien1_t
+	inc	@r0
+	mov	a,@r0
+	xrl	a,#3
+	jnz	.nochar
+	call	gameover
+	call	vdcenable
+	call	gfxoff
+	call	clearchar
+	jmp	titlescreen
+
+.nochar	call	extramenable
+	; get one random byte for better randomisation
+	bcall	getrandbyteb1
+	bcall	waitfireb1
+	jnz	.fire
+	call	vdcenable
+	jmp	.tloop			; wait until button pressed
+.fire	jmp	switchmb0_3
+	endsection titlescreen
+
+;show level title screen
+;** called from bank3
+levelscreen section levelscreen
+	call	vdcenable
+	call	gfxoff
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black | col_grd_white | col_grd_lum
+	movx	@r0,a
+
+	section level
+	; print "LEVEL"
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(leveltext)
+	call	setquad
+	mov	r0,#vdc_quad1
+	call	setquad
+	; print which level
+	mov	r0,#iram_level
+	mov	a,@r0
+	inc	a		; start display with level 1
+	mov	r0,#vdc_quad0+12
+	mov	r3,#038h	; X position
+	mov	r4,#028h	; Y position
+	mov	r5,a
+	mov	r6,#col_chr_yellow
+	call	printchar
+	endsection level
+
+	section score
+	; print "SCORE"
+	mov	r0,#vdc_char0
+	mov	r3,#008h
+	mov	r4,#042h
+	mov	r2,#005h
+	mov	r1,#lo(scorestr)
+	mov	r7,#col_chr_cyan
+	call	printstr
+	; show score
+	mov	r3,#038h	; X position
+	mov	r6,#col_chr_cyan
+	mov	r1,#eram_scoreh
+	bcall	showscoreb1
+	endsection score
+
+	section shield
+	; print "SHIELD"
+	mov	r0,#vdc_quad2
+	mov	r1,#lo(shieldtext)
+	call	setquad
+	mov	r0,#vdc_quad3
+	call	setquad
+	; set grid to shield strength
+	mov	r0,#vdc_gridh8
+	mov	r1,#iram_shield
+	mov	a,@r1			; never 0 here
+	mov	r2,a
+	mov	a,#008h
+	; set some of the vgrid
+.loop	movx	@r0,a
+	dec	r0
+	djnz	r2,.loop
+.end	endsection shield
+
+	call	gfxon
+
+	call	extramenable
+	mov	r0,#eram_joystate
+	clr	a
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+
+.joy	call	waitvsync
+	IFDEF CHEAT_LEVEL
+	call	levelcheat
+	ENDIF
+	bcall	waitfireb1
+	jz	.joy
+	sel	mb1
+	jmp	switchmb1_3
+	endsection levelscreen
+
+; show "GAME OVER" message
+gameover section gameover
+	; set hiscore if score is bigger
+	call	extramenable
+	; check if hiscore-score is negative
+	mov	r0,#eram_hiscl
+	mov	r1,#eram_scorel
+	mov	r2,#3			; 3 bytes for score
+	clr	c
+	cpl	c			; this is the 1 added to the complement
+.sclop	movx	a,@r0			; hiscore
+	mov	r3,a
+	movx	a,@r1			; score
+	cpl	a
+	addc	a,r3			; hiscore-score
+	dec	r0
+	dec	r1
+	djnz	r2,.sclop
+	; if carry is clear we have a new hiscore
+	jc	.draw			; no new hiscore
+
+.newhi	; new hiscore, copy score to hiscore
+	mov	r0,#eram_scoreh
+	mov	r1,#eram_hisch
+	mov	r2,#3			; 3 bytes for score
+.copysc	movx	a,@r0
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	djnz	r2,.copysc
+
+.draw	; init waitfire for 20 seconds wait
+	mov	r0,#eram_joystate
+	clr	a
+	movx	@r0,a
+	inc	r0
+	mov	a,#235			; 20 seconds wait
+	movx	@r0,a
+	; black background
+	call	vdcenable
+	call	gfxoff
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black
+	movx	@r0,a
+	; clear sprites
+	mov	r0,#vdc_spr0_ctrl
+	mov	r2,#16
+	mov	a,#0f8h
+.clrspr	movx	@r0,a
+	inc	r0
+	djnz	r2,.clrspr
+	; draw static elements
+	; show score
+	mov	r0,#vdc_char0
+	mov	r3,#05ch
+	mov	r4,#060h
+	mov	r6,#col_chr_cyan
+	mov	r1,#eram_scoreh
+	bcall	showscoreb1
+	; show hi-score
+	mov	r0,#vdc_char6
+	mov	r3,#05ch
+	mov	r4,#080h
+	mov	r6,#col_chr_white
+	mov	r1,#eram_hisch
+	bcall	showscoreb1
+	; print "HISCORE"
+	mov	r0,#vdc_quad2
+	mov	r1,#lo(hiscoretext)
+	call	setquad
+	mov	r0,#vdc_quad3
+	call	setquad
+	call	gfxon
+
+	; dynamic drawing routine
+.tloop	call	waitvsync
+	call	vdcenable
+	; prepare for mid screen update after "GAME OVER"
+	mov	a,#0beh
+	mov	t,a
+	strt	cnt
+	call	gfxoff
+	; print "G A M E  O V E R"
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(overtext)
+	call	setquad
+	mov	r0,#vdc_quad1
+	call	setquad
+	call	gfxon
+	; wait until "GAME OVER" is finished drawing
+.wait	mov	a,t
+	jnz	.wait
+	call	gfxoff
+	; print "SCORE"
+	mov	r0,#vdc_quad0
+	mov	r1,#lo(scoreotext)
+	call	setquad
+	mov	r0,#vdc_quad1
+	call	setquad
+	call	gfxon
+
+	; joystick fire button check
+	call	extramenable
+	bcall	waitfireb1
+	jnz	.ret			; button pressed
+	jmp	.tloop
+.ret	ret
+	endsection gameover
+
+;FREE: 016h
+
+	org	0648h
+
+; move data into quad, other banks have the same routine but other data
+; Input: r0 quad, r1 pointer to text
+setquad section setquad
+; NOTE:
+; This routine copies a ROM table into a quad, all 4 chars are set. It copies
+; 4 bytes, position and contents of the first sub-quad and then only fills
+; in the contents for the next 3 sub-quads, the position data is skipped as
+; it is not used.
+	mov	r2,#4
+	mov	r3,#4
+.loop0	mov	a,r1
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r1
+	djnz	r2,.loop0
+	inc	r0
+	inc	r0
+	mov	r2,#2
+	djnz	r3,.loop0
+	ret
+	endsection setquad
+
+	codepage videopac
+
+killtext
+	quaddef	018h, 028h, blue, "KL H"
+	quaddef	020h, 028h, blue, "ILTE"
+
+alientext
+	quaddef	018h, 060h, green, "AIN "
+	quaddef	020h, 060h, green, "LES "
+
+overtext
+	quaddefcolor 010h, 030h, green, red, blue, yellow, 'GAME'
+	quaddefcolor 060h, 030h, yellow, blue, red, green, 'OVER'
+
+scoreotext
+	quaddef 01ch, 060h, cyan, "SOE "
+	quaddef 024h, 060h, cyan, "CR  "
+
+hiscoretext
+	quaddefcolor 01ch, 080h, red, blue, violet, red, 'HSOE'
+	quaddefcolor 024h, 080h, green, cyan, yellow, black, 'ICR '
+
+shieldtext
+	quaddef 008h, 05ch, white, "SIL "
+	quaddef 010h, 05ch, white, "HED "
+
+leveltext
+	quaddef 008h, 028h, yellow, "LVL "
+	quaddef 010h, 028h, yellow, "EE  "
+
+	codepage standard
+
+	assert "hi(setquad) == hi($-1)"
+
+;** called from bank 3
+gameoverb3 section gameoverb3
+	; play game over tune
+	mov	a,#lo(tune_gameover)
+	call	playsound
+	; display game over screen
+	call	gameover
+	jmp	switchmb0_3
+	endsection gameoverb3
+
+;## initialize for 7400 mode, called by plusselectgame on VP+ G7400 machine
+init7400 section init7400
+	call	extramenable
+	dis	i			; need access to rb0
+	sel	rb0
+	mov	a,r7			; last pressed key
+	sel	rb1
+	en	i
+	jz	.skip			; disable plus mode when "0"
+	mov	r0,#eram_plusmode
+	mov	a,#0ffh
+	movx	@r0,a			; set flag for VP+ G7400
+.skip	mov	a,#0ffh
+	mov	r7,#0ffh
+	call	plusmode		; hide all 7400 gfx
+	jmp	plusstart		; reinit VDC and start game in bank3
+	endsection init7400
+
+; allow cheating on level screen
+; Press SPACE for sound effect
+; Press 1-7 for level jump
+; Press C for game completed marker
+; Other keys will crash game
+levelcheat
+	section levelcheat
+	call	readkey
+	jb7	.end			; no key pressed
+	mov	r7,a
+	xrl	a,#0ch			; space pressed?
+	jnz	.snd1
+	; play sound
+	mov	a,#lo(tune_gameover)
+	jmp	.sound
+.snd1	; check for game complete
+	mov	a,r7
+	xrl	a,#023h			; C pressed?
+	jnz	.lvl
+	mov	r0,#eram_completion
+	mov	a,#010h
+	movx	@r0,a
+	jmp	.beep
+.lvl	; set next level to key
+	mov	a,r7
+	dec	a
+	mov	r0,#iram_level
+	mov	@r0,a
+.beep	mov	a,#lo(tune_bonusbeep)
+.sound	call	playsound
+.end	ret
+	endsection levelcheat
+
+
+; print a string, ROM pointer in R1, length in r2, color in R7
+printstr section printstr
+	mov	a,r7		; get color
+	mov	r6,a		; into r6 for printchar
+	mov	a,r1		; ROM pointer
+	movp	a,@a		; char from ROM
+	mov	r5,a		; into r5 for printchar
+	call	printchar	; print it
+	inc	r1		; next ROM position
+	djnz	r2,printstr	; until all printed
+	ret			; finished
+	endsection printstr
+
+	codepage videopac
+
+attackstr
+	db	"ATTACKING"
+
+scorestr
+	db	"SCORE"
+
+	codepage standard
+
+	assert "hi(printstr) == hi($)"
+
+; fill in quad data with scrolltext starting at r2, x/y in r3/r4
+; see how the scrolltext is prepared at scrolldef
+setscroll section setscroll
+	; start with first 2 quads
+	mov	r0,#vdc_quad0
+	mov	r1,#vdc_quad1
+	; set y position
+	mov	a,r4
+	movx	@r0,a
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	; set x position
+	mov	a,r3
+	mov	r6,#1		; set flag for quad0/1
+.loop1	movx	@r0,a
+	add	a,#8
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	mov	r7,#4		; 4 chars in 1 quad
+.loop2	mov	a,r2
+	movp	a,@a		; get char data
+	inc	r2
+	clr	c
+	rlc	a		; *2
+	dec	a		; -1, adjustment for y position
+	movx	@r0,a
+	inc	r0
+	clr	a
+	rlc	a		; highest bit of charpointer
+	orl	a,#col_chr_white	; set color
+	movx	@r0,a
+	inc	r0
+	mov	a,r2
+	movp	a,@a		; get char data
+	inc	r2
+	clr	c
+	rlc	a		; *2
+	dec	a		; -1, adjustment for y position
+	movx	@r1,a
+	inc	r1
+	clr	a
+	rlc	a		; highest bit of charpointer
+	orl	a,#col_chr_white	; set color
+	movx	@r1,a
+	inc	r1
+	; advance to next char pointer in quad
+	inc	r0
+	inc	r0
+	inc	r1
+	inc	r1
+	djnz	r7,.loop2
+	; tricky: if flag is set, clear it and continue
+	;         if flag is already cleared, end of routine
+	djnz	r6,.ret
+	; restart again with quad 2/3
+	mov	r0,#vdc_quad2
+	mov	r1,#vdc_quad3
+	; y position
+	mov	a,r4
+	movx	@r0,a
+	movx	@r1,a
+	inc	r0
+	inc	r1
+	; x position
+	mov	a,r3
+	add	a,#040h
+	jmp	.loop1
+.ret	ret
+	endsection setscroll
+
+	codepage videopac
+
+; macro for scrolltext definition
+; here I squeeze the data for the 9 bit charpointer into 8 bits
+; to get the real charpointer: if y%4=0 data*2 else data*2-1
+; the -1 has to be coded into setscroll if necessary (it is)
+scrolldef macro text,y
+	irpc	char,text
+	db	'char'*4-y/4
+	endm
+	endm
+
+; Due to the very simple scrolling routine I have to repeat the first 16
+; chars of the scrolltext. This looks like wasting ROM space, but checking
+; for the end of text takes some byte, too and slows the setscroll down.
+scrolltext
+	scrolldef "BY SOEREN GUST -", 096h
+	scrolldef " 2003/12/09 ",096h
+
+	scrolldef "- I PROUDLY PRESENT", 096h
+	scrolldef " AFTER 5 YEARS OF CODING", 096h
+	scrolldef " MY FIRST REAL VIDEOPAC GAME - ", 096h
+scrollend
+	scrolldef "BY SOEREN GUST -", 096h
+
+	codepage standard
+
+	assert "hi(scrolltext) == hi($)"
+
+; here starts bank1 MB1 ------------------------------------------------------
+
+	org	0800h			; bank1/mb1
+
+	include	"switchmb1.h"		; bank switch table for mb1
+
+	org	084ch
+
+;## display additional background gfx on Videopac+ G7400
+;** called from bank 3
+levelplus section levelplus
+	sel	mb0
+	call	plusenable
+	; turn off display for faster access
+	mov	a,#plus_loadr_tt
+	call	plusloadr
+
+	; make background color (black) transparent, highlight colors
+	section background
+	mov	r0,#iram_level
+	mov	a,@r0
+	add	a,#lo(highlighttable)
+	sel	mb1
+	call	gethighlight
+	sel	mb0
+	mov	r7,#0feh
+	call	plusmode
+	endsection background
+
+	; clear background
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wr
+	sel	mb0
+	call	pluscmd		; auto advance cursor
+	mov	r0,#iram_level
+	mov	a,@r0
+	add	a,#lo(colortable)
+	sel	mb1
+	call	getcolors
+	mov	r2,a
+	call	backfill
+
+	; set cursor position for char defining: last line, not visible
+	mov	r7,#plus_cmd_brow
+	mov	r6,#23
+	sel	mb0
+	call	pluscmd
+	sel	mb1
+
+	; redefine charset and draw objects for each level
+	section drawobjects
+	mov	r0,#iram_level
+	mov	a,@r0
+	add	a,#lo(.lvltab)
+	call	.call
+	jmp	.end
+.call	jmpp	@a		; ret in leveldraw_ routines
+.lvltab
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+	db	lo(.to4)
+	db	lo(.to5)
+	db	lo(.to6)
+	db	lo(.to7)
+.to1	jmp	leveldraw_1
+.to2	jmp	leveldraw_2
+.to3	jmp	leveldraw_3
+.to4	jmp	leveldraw_4
+.to5	jmp	leveldraw_5
+.to6	jmp	leveldraw_6
+.to7	jmp	leveldraw_7
+
+	assert	"hi(.lvltab-1) == hi($)"	; -1 for adr of jmp @a
+
+.end	endsection drawobjects
+
+	; turn display back on
+	mov	a,#plus_loadr_tt | plus_loadr_srow | plus_loadr_dspl | plus_loadr_box
+	sel	mb0
+	call	waitvsync
+	call	plusloadr
+
+	sel	mb1
+	jmp	switchmb1_3
+	endsection levelplus
+
+; forest level: sun and cloud
+leveldraw_forest section leveldraw_forest
+	mov	r2,#lo(level_forest)
+	jmp	drawit
+	endsection leveldraw_forest
+
+; water level: raining clouds
+leveldraw_water section leveldraw_water
+	mov	r2,#lo(level_water)
+	jmp	drawit
+	endsection leveldraw_water
+
+; street level: moon and cloud
+leveldraw_street section leveldraw_street
+	mov	r2,#lo(level_street)
+	jmp	drawit
+	endsection leveldraw_street
+
+; pyramid level: sun setting
+leveldraw_pyramid section leveldraw_pyramid
+	mov	r2,#lo(level_pyramid)
+	jmp	drawit
+	endsection leveldraw_pyramid
+
+; train level: mountain background
+leveldraw_train section leveldraw_train
+	bjmp	mountainplus		; ret in routine, stack size critical
+	endsection leveldraw_train
+
+; ice level: snowflakes
+leveldraw_ice section leveldraw_ice
+	; define flakes
+	mov	r2,#lo(level_ice)
+	call	drawit		; only redefine chars
+
+	; draw flakes from flaketab, access via getlvl1
+	mov	r2,#lo(flaketab)	; start of flake data
+.loop	call	getlvl1			; get x position/end marker
+	jnz	.cont
+	ret				; end of table, finished
+.cont	mov	r0,a			; x position
+	call	getlvl1
+	mov	r6,a			; store y pos+flaketype
+	anl	a,#07fh			; clear flaketype
+	mov	r3,a			; y position
+	mov	a,r6			; get flaketype (ignore position)
+	mov	r6,#lo(flake2_char)	; flake type 2
+	jb7	.draw
+	mov	r6,#lo(flake1_char)	; flake type 1
+.draw	; store flake table pointer
+	mov	r1,#iram_temp
+	mov	a,r2
+	mov	@r1,a
+	; copy regs and draw flake
+	mov	a,r6
+	mov	r2,a			; pointer to flake
+	mov	r5,#col_plus_white | col_patr_stable
+	call	draw
+	; restore flake table pointer
+	mov	r0,#iram_temp
+	mov	a,@r0
+	mov	r2,a
+	jmp	.loop
+	endsection leveldraw_ice
+
+; moon level: starfield and earth image
+leveldraw_moon section leveldraw_moon
+	mov	r2,#lo(level_moon)
+	call	drawit		; only redefine chars
+
+	; draw some random stars
+	mov	r5,#50
+.stars	sel	mb0
+	call	extramenable
+	bcall	getrandbyteb1
+	mov	r2,a			; random value for type
+	bcall	getrandbyteb1
+	mov	r3,a			; random value for x
+	bcall	getrandbyteb1
+	mov	r4,a			; random value for y
+	call	plusenable
+	; set y position
+	anl	a,#00fh
+	add	a,#01fh
+	mov	r6,a
+	mov	r7,#plus_cmd_brow
+	call	pluscmd
+	; set x position
+	mov	a,r3
+	anl	a,#03fh
+	mov	r6,a
+	add	a,#0d9h			; check for <39
+	jnc	.skipstars
+	sel	mb1
+	jmp	.stars
+.skipstars
+	inc	r6			; never on first column, box mode
+	mov	r7,#plus_cmd_loadx
+	call	pluscmd
+	; type of star
+	mov	a,r2
+	anl	a,#3
+	; map 0/1 to smallest, 2 to middle, 3 to big
+	jz	.small
+	dec	a
+.small	add	a,#0a0h
+	mov	r7,a
+	mov	r6,#col_plus_white
+	call	plusdata
+	sel	mb1
+	djnz	r5,.tstars
+	jmp	.strend
+.tstars	jmp	.stars		; avoid djnz over page border
+
+.strend ; draw the earth image
+	mov	r2,#lo(earth_char)
+	mov	r0,#010h	; x position
+	mov	r1,#6		; width
+	mov	r3,#020h	; y position
+	mov	r4,#5		; height
+	jmp	drawmulti	; short form of call+ret
+	endsection leveldraw_moon
+
+getlvl1 section getlevel1
+	mov	a,r2
+	movp	a,@a
+	inc	r2
+	ret
+	endsection getlevel1
+
+; forest level: sun and cloud
+level_forest
+	db	1, 020h, 039h, lo(sunbits), 0
+	db	1, 039h, 043h, lo(sunbits2), 1
+	db	2, 01eh, 021h, lo(sun_char), col_plus_yellow | col_patr_stable
+	db	2, 008h, 023h, lo(cloud_char), col_plus_white | col_patr_stable
+	db	0
+
+; water level: raining clouds
+level_water
+	db	1, 03ah, 043h, lo(cloud_bits), 1
+	db	1, 043h, 047h, lo(rain_bits), 2
+	db	1, 020h, 031h, lo(cloud2_bits), 2
+	db	2, 003h, 026h, lo(cloud_char), col_plus_white | col_patr_stable
+	db	2, 021h, 026h, lo(cloud_char), col_plus_white | col_patr_stable
+	db	2, 004h, 028h, lo(rain1_char), col_plus_white | col_patr_stable
+	db	2, 022h, 028h, lo(rain1_char), col_plus_white | col_patr_stable
+	db	2, 00eh, 025h, lo(cloud2_char), col_plus_white | col_patr_stable
+	db	2, 010h, 028h, lo(rain2_char), col_plus_white | col_patr_stable
+	db	0
+
+; street level: moon and cloud
+level_street
+	db	1, 020h, 029h, lo(moon1_bits), 1
+	db	1, 03ah, 043h, lo(cloud_bits), 1
+	db	2, 00ah, 022h, lo(moon1_char), col_plus_cyan | col_patr_stable
+	db	2, 018h, 021h, lo(cloud_char), col_plus_white | col_patr_stable
+	db	0
+
+; pyramid level: sun setting
+level_pyramid
+	db	1, 020h, 031h, lo(sunbits), 0
+	db	2, 020h, 02ch, lo(sun_char), col_plus_yellow | col_patr_stable
+	db	0
+
+; ice level: only char redefinitions
+level_ice
+	db	1, 020h, 023h, lo(flake1_bits), 1
+	db	1, 023h, 027h, lo(flake2_bits), 2
+	db	0
+
+; ice level: flaketab has different format, shorter
+flaketab
+	; x, y | flaketype
+	include "flakes.h"
+
+; moon level: only char redefinitions
+level_moon
+	db	1, 0a0h, 0b9h, lo(earth_bits), 3
+	db	1, 020h, 023h, lo(star1_bits), 1
+	db	0
+
+	assert	"hi(getlvl1) == hi($)"
+
+	org	0a00h
+
+; draw a full level from ROM table
+drawit section drawit
+; Input:
+;  R2 pointer to ROM table
+	call	getlvl1			; command
+	jz	.ret			; 0 = end
+	dec	a
+	jz	.define			; 1 = define
+	jmp	.draw			; other = draw
+
+.ret	ret
+
+; redefine char
+.define call	getlvl1			; get start char
+	mov	r3,a
+	call	getlvl1			; get end char
+	mov	r4,a
+	call	getlvl1			; get pointer
+	mov	r6,a
+	call	getlvl1			; get page
+	mov	r7,a
+	; store pointer to our table
+	mov	r0,#iram_temp
+	mov	a,r2
+	mov	@r0,a
+	; copy regs
+	mov	a,r6
+	mov	r2,a			; pointer to bitmap
+	mov	a,r7			; page of bitmap
+	call	defchr
+	; restore our pointer
+	mov	r0,#iram_temp
+	mov	a,@r0
+	mov	r2,a
+	jmp	drawit
+
+; draw object
+.draw	call	getlvl1			; get x position
+	mov	r0,a
+	call	getlvl1			; get y position
+	mov	r3,a
+	call	getlvl1			; get pointer
+	mov	r6,a
+	call	getlvl1			; get attribute
+	mov	r5,a
+	; store pointer to our table
+	mov	r1,#iram_temp
+	mov	a,r2
+	mov	@r1,a
+	; copy regs
+	mov	a,r6
+	mov	r2,a			; pointer to object
+	call	draw
+	; restore our pointer
+	mov	r0,#iram_temp
+	mov	a,@r0
+	mov	r2,a
+	jmp	drawit
+	endsection drawit
+
+; Define charset
+; Input:
+;  A  which call to use to get data
+;  R2 low byte of charset ROM pointer
+;  R3 first char to define, bit 7 is used for background gfx
+;  R4 last char to define+1
+defchr	section definechars
+	mov	r0,#iram_datacall
+	mov	@r0,a
+.loop2	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrni
+	sel	mb0
+	call	pluscmd		; do not move cursor
+	mov	a,r3
+	anl	a,#080h
+	mov	r6,a		; attribute parameter
+	mov	a,r3
+	orl	a,#080h
+	mov	r7,a		; char to redefine
+	call	plusdata	; print it
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrsl
+	call	pluscmd		; redefine char
+	mov	r5,#10		; 10 bytes in 1 char
+	sel	mb1
+.loop	mov	r0,#iram_datacall
+	mov	a,@r0
+	call	getbits
+	inc	r2		; advance pointer
+	mov	r6,a
+	mov	r7,a
+	sel	mb0
+	call	plusdata
+	sel	mb1
+	djnz	r5,.loop
+	inc	r3		; next char
+	mov	a,r3
+	xrl	a,r4		; check if last char reached
+	jnz	.loop2
+
+	; turn off char definition mode
+.ret	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wr
+	sel	mb0
+	call	pluscmd		; write to screen, auto advance cursor
+	sel	mb1
+	ret
+	endsection definechars
+
+; Draw a rectangular char object
+draw	section draw
+; Input
+;  R0 left x position
+;  R2 low byte of char ROM pointer
+;  R3 top y position
+;  R5 attribute byte
+; Usage
+;  R4 height in lines
+	; store parameters for later use
+	mov	a,r0
+	mov	r0,#iram_xpos
+	mov	@r0,a		; x position
+	inc	r0
+	call	getchr1		; read width from table
+	inc	r2
+	mov	@r0,a		; width
+	inc	r0
+	mov	a,r5
+	mov	@r0,a		; attribute
+	call	getchr1		; read height from table
+	inc	r2
+	mov	r4,a		; height
+.loop2	mov	a,r3
+	mov	r6,a
+	mov	r7,#plus_cmd_loady
+	sel	mb0
+	call	pluscmd		; set line
+	mov	r7,#plus_cmd_loadx
+	mov	r0,#iram_xpos
+	mov	a,@r0
+	mov	r6,a		; first column
+	call	pluscmd		; set column
+	mov	r0,#iram_width
+	mov	a,@r0
+	mov	r5,a		; chars per line
+.loop	sel	mb1
+	call	getchr1
+	sel	mb0
+	mov	r7,a
+	mov	r0,#iram_attr
+	mov	a,@r0
+	mov	r6,a		; attribute
+	call	plusdata
+	inc	r2		; advance pointer
+	djnz	r5,.loop
+	inc	r3		; next line
+	djnz	r4,.loop2
+	sel	mb1
+	ret
+	endsection draw
+
+; Draw a rectangular char object
+drawmulti section drawmulti
+; Input
+;  R0 left x position
+;  R1 width in lines
+;  R2 low byte of char ROM pointer
+;  R3 top y position
+;  R4 height in lines
+	; store parameters for later use
+	mov	a,r0
+	mov	r0,#iram_xpos
+	mov	@r0,a		; x position
+	inc	r0
+	mov	a,r1
+	mov	@r0,a		; width
+.loop2	mov	a,r3
+	mov	r6,a
+	mov	r7,#plus_cmd_loady
+	sel	mb0
+	call	pluscmd		; set line
+	mov	r7,#plus_cmd_loadx
+	mov	r0,#iram_xpos
+	mov	a,@r0
+	mov	r6,a		; first column
+	call	pluscmd		; set column
+	mov	r0,#iram_width
+	mov	a,@r0
+	mov	r5,a		; chars per line
+.loop	sel	mb1
+	call	getchr1
+	mov	r6,a		; attribute
+	inc	r2		; advance pointer
+	call	getchr1
+	mov	r7,a		; char
+	inc	r2		; advance pointer
+	sel	mb0
+	call	plusdata
+	djnz	r5,.loop
+	inc	r3		; next line
+	djnz	r4,.loop2
+	sel	mb1
+	ret
+	endsection drawmulti
+
+; Fill lines with background color and activate boxed mode. Using boxed mode
+; means that the black border of the VP+ extends to the whole screen. This
+; only works if Pin B of the cartridge is not connected.
+; Input:
+;  R2 background color
+backfill section backfill
+	sel	mb0
+	mov	r7,#plus_cmd_brow
+	mov	r6,#01fh
+	call	pluscmd		; set cursor to home position
+	mov	r4,#25		; fill 25 lines
+.loop	mov	a,r2		; get color
+	mov	r6,a		; set color
+	mov	r7,#col_satr_enable | col_satr_box
+	call	plusdata	; change background color
+	mov	r3,#39		; fill rest of line with spaces
+	mov	r6,#0
+	mov	r7,#020h
+.loop2	call	plusdata
+	djnz	r3,.loop2
+	djnz	r4,.loop
+	sel	mb1
+	ret
+	endsection backfill
+
+	org	0b00h
+
+; bitmap data 0
+getbits0 section getbits0
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits0
+
+; the bitmaps for the sun chars
+sunbits
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000010b
+	db	00000100b
+	db	00001000b
+
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	10000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	01000000b
+	db	00100000b
+	db	00010000b
+
+	db	00010000b
+	db	00100000b
+	db	01000000b
+	db	10000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11110000b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00001111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+
+	db	00001000b
+	db	00000100b
+	db	00000010b
+	db	00000001b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111000b
+	db	11111100b
+	db	11111100b
+	db	11111110b
+	db	11111110b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00011111b
+	db	00111111b
+	db	00111111b
+	db	01111111b
+	db	01111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00111111b
+
+	db	11111100b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000011b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+	db	11111110b
+	db	11111110b
+	db	11111100b
+	db	11111100b
+	db	11111000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	01111111b
+	db	01111111b
+	db	00111111b
+	db	00111111b
+	db	00011111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	01000000b
+	db	00100000b
+	db	00010000b
+
+	db	11110000b
+	db	11100000b
+	db	11000000b
+	db	10000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+	db	11110000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00001111b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00001111b
+	db	00000111b
+	db	00000011b
+	db	00000001b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000010b
+	db	00000100b
+	db	00001000b
+
+	db	00001000b
+	db	00000100b
+	db	00000010b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+
+	assert "hi(getbits0) == hi($)"
+
+;FREE: full
+
+	org	0c00h
+
+; bitmap data 1
+getbits1 section getbits1
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits1
+
+; more bitmaps for the sun chars
+sunbits2
+	db	00010000b
+	db	00100000b
+	db	01000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+; bitmap for the cloud
+cloud_bits
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+	db	11111000b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	11100000b
+	db	11111000b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000001b
+	db	00001111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+	db	11111100b
+	db	11111000b
+	db	11110000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11100011b
+	db	10000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00111111b
+	db	00011111b
+	db	00000111b
+	db	00000000b
+	db	00000000b
+
+; bitmap for the moon
+moon1_bits
+	db	00000000b
+	db	00000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111100b
+	db	11111100b
+	db	11111110b
+	db	11111110b
+
+	db	11111000b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000111b
+	db	00111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00011111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000111b
+	db	00000111b
+	db	00000001b
+	db	00000000b
+	db	00000000b
+
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	01111111b
+	db	00111111b
+
+	db	00001111b
+	db	00000111b
+	db	00000011b
+	db	00000001b
+	db	00000001b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111110b
+	db	11111110b
+	db	11111100b
+	db	11111100b
+	db	11111000b
+	db	11110000b
+	db	11100000b
+	db	11000000b
+	db	00000000b
+	db	00000000b
+
+	db	00111111b
+	db	00111111b
+	db	00111111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011000b
+
+flake1_bits
+	db	01010000b
+	db	00100100b
+	db	00100110b
+	db	10101000b
+	db	01110001b
+	db	11111110b
+	db	01110001b
+	db	10101000b
+	db	00100110b
+	db	00100100b
+
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000000b
+	db	00000100b
+	db	00000011b
+	db	00000100b
+	db	00000000b
+	db	00000011b
+	db	00000001b
+
+	db	01010000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+star1_bits
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00010000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00001000b
+	db	00011100b
+	db	00001000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000000b
+	db	00000000b
+	db	00001000b
+	db	00011100b
+	db	00111110b
+	db	00011100b
+	db	00001000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	assert "hi(getbits1) == hi($)"
+
+;FREE: full
+
+	org	0d00h
+
+; bitmap data 2
+getbits2 section getbits2
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits2
+
+cloud2_bits
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+	db	11110000b
+	db	11111000b
+
+	db	00000000b
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000001b
+	db	00001111b
+	db	00111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	11100000b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	01110000b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000001b
+	db	00000111b
+	db	00011111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000011b
+	db	00000111b
+	db	00001111b
+	db	00011111b
+	db	00111111b
+
+	db	11111100b
+	db	11111110b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+
+	db	01111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	01111111b
+
+	db	11111110b
+	db	11111110b
+	db	11111100b
+	db	11111100b
+	db	11111000b
+	db	11111000b
+	db	11110000b
+	db	11100000b
+	db	10000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	00111110b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	01111111b
+	db	00000111b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11100000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111110b
+	db	11100000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	00111110b
+
+	db	01111111b
+	db	00111111b
+	db	00111111b
+	db	00011111b
+	db	00011111b
+	db	00001111b
+	db	00000111b
+	db	00000011b
+	db	00000000b
+	db	00000000b
+
+rain_bits
+	db	10000000b
+	db	01000000b
+	db	00100000b
+	db	10000000b
+	db	01000000b
+	db	00100000b
+	db	10000000b
+	db	01000000b
+	db	00100000b
+	db	00000000b
+
+	db	10001000b
+	db	01000100b
+	db	00100010b
+	db	10001000b
+	db	01000100b
+	db	00100010b
+	db	10001000b
+	db	01000100b
+	db	00100010b
+	db	00000000b
+
+	db	00001000b
+	db	00000100b
+	db	00000010b
+	db	00001000b
+	db	00000100b
+	db	00000010b
+	db	00001000b
+	db	00000100b
+	db	00000010b
+	db	00000000b
+
+	db	00000000b
+	db	10001000b
+	db	01000100b
+	db	00100010b
+	db	10001000b
+	db	01000100b
+	db	00100010b
+	db	10001000b
+	db	01000100b
+	db	00100010b
+
+flake2_bits
+	db	00100000b
+	db	01001000b
+	db	10001000b
+	db	10001110b
+	db	10010000b
+	db	10100001b
+	db	11000010b
+	db	11111100b
+	db	11000010b
+	db	10100001b
+
+	db	00000010b
+	db	00001001b
+	db	00001000b
+	db	00111000b
+	db	00000100b
+	db	01000010b
+	db	00100001b
+	db	00011111b
+	db	00100001b
+	db	01000010b
+
+	db	10010000b
+	db	10001110b
+	db	10001000b
+	db	01001000b
+	db	00100000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	00000100b
+	db	00111000b
+	db	00001000b
+	db	00001001b
+	db	00000010b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	assert "hi(getbits2) == hi($)"
+
+;FREE: full
+
+	org	0e00h
+
+; bitmap data 3
+getbits3 section getbits3
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getbits3
+
+earth_bits
+	; line 1
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11000000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	11111000b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00011111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000011b
+
+	; line 2
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	11000000b
+	db	11000000b
+	db	11100000b
+	db	11100000b
+
+	db	11110000b
+	db	11111000b
+	db	11111100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	10000000b
+	db	10000000b
+	db	00000000b
+	db	10000000b
+
+	db	11001100b
+	db	11100100b
+	db	11101100b
+	db	11111110b
+	db	11111111b
+	db	11111111b
+	db	11101011b
+	db	11000000b
+	db	10000100b
+	db	00001111b
+
+	db	00000111b
+	db	00011111b
+	db	00111111b
+	db	01111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000011b
+	db	00000011b
+	db	00000111b
+	db	00000111b
+
+	; line 3
+	db	11110000b
+	db	11110000b
+	db	11110000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000001b
+	db	00000011b
+	db	00000011b
+
+	db	11000000b
+	db	11100000b
+	db	11110000b
+	db	11111000b
+	db	11111000b
+	db	11111000b
+	db	11110000b
+	db	11110000b
+	db	01100000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111100b
+	db	11110000b
+
+	db	00111100b
+	db	11111011b
+	db	11110111b
+	db	01100111b
+	db	01101111b
+	db	00011111b
+	db	01111111b
+	db	01111111b
+	db	00111111b
+	db	00011111b
+
+	db	00001111b
+	db	00001111b
+	db	00001111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+	db	00011111b
+
+	; line 4
+	db	11111000b
+	db	11110000b
+	db	11110000b
+	db	11110000b
+	db	11100000b
+	db	11100000b
+	db	11000000b
+	db	11000000b
+	db	10000000b
+	db	00000000b
+
+	db	00000011b
+	db	00000111b
+	db	00000111b
+	db	00001111b
+	db	00001111b
+	db	00001111b
+	db	00001111b
+	db	00001111b
+	db	00000111b
+	db	00000011b
+
+	db	11110000b
+	db	11110000b
+	db	11100000b
+	db	11100000b
+	db	11100000b
+	db	11110000b
+	db	11110000b
+	db	11100000b
+	db	11100000b
+	db	11000000b
+
+	db	00011111b
+	db	00001111b
+	db	00001111b
+	db	00011111b
+	db	01001111b
+	db	00101111b
+	db	00100111b
+	db	00000011b
+	db	00000001b
+	db	00000000b
+
+	db	00011111b
+	db	00001111b
+	db	00001111b
+	db	00001111b
+	db	00000111b
+	db	00000111b
+	db	00000011b
+	db	00000011b
+	db	00000001b
+	db	00000000b
+
+	; line 5, last
+	db	11111110b
+	db	11111100b
+	db	11111000b
+	db	11110000b
+	db	11000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	11111111b
+	db	00011111b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	db	01111111b
+	db	00111111b
+	db	00011111b
+	db	00001111b
+	db	00000011b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00000000b
+
+	assert "hi(getbits3) == hi($)"
+
+	org	0f00h
+
+getchr1 section getchar1
+	mov	a,r2
+	movp	a,@a
+	ret
+	endsection getchar1
+
+; the char data for the sun
+sun_char
+	db	8,6
+	db	020h,0a0h,020h,0a1h,020h,020h,0a2h,020h
+	db	020h,0a3h,0a4h,0a5h,0a6h,0a7h,0a8h,020h
+	db	020h,020h,0a9h,07fh,07fh,0aah,0abh,0ach
+	db	0adh,0aeh,0afh,07fh,07fh,0b0h,020h,020h
+	db	020h,0b1h,0b2h,0b3h,0b4h,0b5h,0b6h,020h
+	db	020h,0b7h,020h,020h,0b8h,020h,0b9h,020h
+
+cloud_char
+	db	5,2
+	db	0bah,0bbh,07fh,0bch,0bdh
+	db	0beh,0bfh,0c0h,0c1h,0c2h
+
+cloud2_char
+	db	8,3
+	db	0a0h,0a1h,07fh,0a2h,0a3h,0a4h,0a5h,0a6h
+	db	0a7h,07fh,07fh,07fh,07fh,07fh,07fh,0a8h
+	db	0a9h,0aah,0abh,0ach,0adh,0aeh,0afh,0b0h
+
+rain1_char
+	db	3,1
+	db	0c3h,0c4h,0c5h
+
+rain2_char
+	db	4,1
+	db	0c6h,0c6h,0c6h,0c6h
+
+moon1_char
+	db	4,3
+	db	0a0h,0a1h,0a2h,0a3h
+	db	0a4h,0a5h,0a6h,020h
+	db	0a7h,0a8h,020h,020h
+
+flake1_char
+	db	2,2
+	db	0a0h, 0a1h
+	db	0a2h, 020h
+
+flake2_char
+	db	2,2
+	db	0a3h, 0a4h
+	db	0a5h, 0a6h
+
+; multicolor char object for earth
+earth_char
+	db	col_patr_stable, 020h
+	blockchar black, blue, 0a0h
+	blockchar black, blue, 0a1h
+	blockchar black, blue, 0a2h
+	blockchar black, blue, 0a3h
+	db	col_patr_stable, 020h
+
+	blockchar black, yellow, 0a4h
+	blockchar black, blue, 0a5h
+	blockchar blue, yellow, 0a6h
+	blockchar blue, yellow, 0a7h
+	blockchar black, yellow, 0a8h
+	blockchar black, yellow, 0a9h
+
+	blockchar black, yellow, 0aah
+	blockchar blue, yellow, 0abh
+	blockchar blue, yellow, 0ach
+	blockchar blue, yellow, 0adh
+	blockchar blue, yellow, 0aeh
+	blockchar black, blue, 0afh
+
+	blockchar black, yellow, 0b0h
+	blockchar blue, yellow, 0b1h
+	db	col_patr_stable, 020h	; bgcolor is blue
+	blockchar blue, yellow, 0b2h
+	blockchar blue, yellow, 0b3h
+	blockchar black, blue, 0b4h
+
+	db	col_patr_stable, 020h
+	blockchar black, blue, 0b5h
+	blockchar black, blue, 0b6h
+	blockchar black, blue, 0b7h
+	blockchar black, blue, 0b8h
+	db	col_patr_stable, 020h
+
+	assert "hi(getchr1) == hi($)"
+
+; bitmap data dispatcher routine
+getbits section getbits
+	add	a,#lo(getbitstable)
+	jmpp	@a
+getbitstable
+	db	lo(.to0)
+	db	lo(.to1)
+	db	lo(.to2)
+	db	lo(.to3)
+.to0	jmp	getbits0
+.to1	jmp	getbits1
+.to2	jmp	getbits2
+.to3	jmp	getbits3
+	endsection getbits
+
+; get highlight byte for VP+
+gethighlight
+	movp	a,@a
+	ret
+
+; table of highlighted colors on VP+
+highlighttable
+	db	colhigh_1
+	db	colhigh_2
+	db	colhigh_3
+	db	colhigh_4
+	db	colhigh_5
+	db	colhigh_6
+	db	colhigh_7
+
+	assert "hi(gethighlight) == hi($)"
+
+; get sky color
+getcolors
+	movp	a,@a
+	ret
+
+; sky colors for VP+ gfx
+colortable
+	db	colplus_1
+	db	colplus_2
+	db	colplus_3
+	db	colplus_4
+	db	colplus_5
+	db	colplus_6
+	db	colplus_7
+
+	assert "hi(getcolors) == hi($)"
+
+	org	0fe8h
+
+	db	0, "$Revision: 1.257 $", 0
+
+	end

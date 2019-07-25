@@ -1,0 +1,2959 @@
+; Kill the attacking aliens for the G7000 / G7400 by Soeren Gust
+;
+; Version 1.0
+;
+; $Id: ktaa_b3.a48,v 1.509 2003/11/27 21:09:40 sgust Exp $
+:
+; History:
+; Version 1.0
+;   First and hopefully final release
+
+; Copyright (C) 2003 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can get the latest version at http://soeren.informationstheater.de
+
+; This is written for asl 1.41r8, see <http://www.alfsembler.de>. I use several
+; special features (macros, section) of asl, so using other assemblers
+; requires a lot of porting.
+
+; Objects used in the game:
+;
+; sprite0: defense ship
+; sprite1-3: aliens
+; char11: shot defense ship
+; char8-10: shots aliens
+; quad0-3: targets
+; char0-7: targets, chars 6/7 only in targetextra_
+;
+; Bankswitching:
+;  bank0mb0: irq+supporting routines, alien shapes
+;  bank0mb1: target drawing routines (bank0 because executed while irq)
+;  bank1mb0: screens: title, gameover, level
+;  bank1mb1: videopac+ g7400 background gfx
+;  bank2mb0: alien respawning, getrandbyte
+;  bank2mb1: screens: bonus
+;  bank3mb0: alien movement/shooting routines
+;  bank3mb1: main gameplay loop, target/ashot collision, misc routines
+
+	cpu	8048
+	page	0		; no page breaks in listings
+	macexp	off		; no macro expansions in listings
+	listing	noskipped	; only show active bank in listing
+
+BANK	equ	3		; current bank, needed for bankswitch macros
+
+	include	"g7000.h"
+	include	"charset.h"	; character set definition for g7000 chars
+	include	"bitfuncs.inc"	; part of asl distribution, see scoretext
+	include "common.h"	; variables, macros, defines
+	include "targets.h"	; target macro declarations
+	include "ktaa_b0.inc"	; tune definitions
+
+; This is bank 3, the default bank after reset
+
+; here starts bank3 MB0 ------------------------------------------------------
+
+	org	0400h			; bank3/mb0
+
+	jmp	plusselectgame		; RESET, no selectgame
+	jmp	irq			; interrupt
+	jmp	lineirqentry		; timer: line irq
+	jmp	myvsyncirqentry		; VSYNC-interrupt
+	jmp	reset			; after selectgame
+	jmp	mysoundirqentry		; custom tune player
+
+	db	"OPNB"			; marker for o2em means PIN B open
+
+; irq entry for bankswitching
+; we are already in bank 0 when the normal vsync interrupt happens in
+; the main game kernel
+
+myvsyncirqentry
+	anl	P1,#0fch		; switch to bank 0
+	nop				; there is a jump here in bank 0
+	nop
+
+lineirqentry
+	sel	rb0			; IRQ register bank
+	mov	r5,a			; store A
+	in	a,P1			; get P1
+	mov	r6,a			; store in R6
+	anl	P1,#0fch		; switch to bank 0
+	nop				; there is a jump here in bank 0
+	nop
+
+; The tune player may be used in this bank, switch to bank 0 for playing
+mysoundirqentry
+	anl	P1,#0fch		; switch to bank 0
+	nop				; there is a jump here in bank 0
+	nop
+
+	include	"switchmb0.h"		; bank switch table for mb0
+
+	org	0460h
+
+reset	section main
+
+	; wait for end of sound
+	mov	r0,#03fh
+	mov	a,@r0
+	jb6	reset
+
+	; check for PAL/NTSC, see palntsc.a48 demo program
+	; unknown machines get NTSC timings
+	section palntsc
+	call	waitvsync	; wait until vsync
+	clr	a		; init counter
+	; count until pulse ends
+.loop	inc	a
+	jz	.error		; counter overflow
+	nop			; prevent overflow on PAL
+	nop
+	nop
+	jt1	.loop
+.error	; 0ceh-0deh is PAL
+	add	a,#021h		; 0efh-0ffh is PAL
+	add	a,#011h		; set carry if PAL
+	jnc	.skppal		; don't set flag on NTSC
+	mov	r0,#iram_palflag
+	mov	@r0,#0ffh
+.skppal endsection palntsc
+
+	; init RNG, entropy is added inside titlescreen
+	call	extramenable
+	mov	r0,#eram_randomh
+	mov	a,#055h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+
+	; I don't clear the hi-score here, that is already done by the BIOS
+	; reset routine.
+
+; NOTE: This is the main loop. It is very messy, lots of sel mbx switching
+; and no clear job separation into the subroutines. Some of the iram has double
+; use for some of the routines, see common.h for alias names. The order of
+; clearall, levelplus and initgame is important! Btw: this runs in mb0.
+.title	; show titlescreen
+	sel	mb1
+	call	clearall		; clear all gfx
+	sel	mb0
+	bcall	titlescreen
+
+	; start a new game
+	sel	mb1
+	call	initgame
+
+.level ; level loop
+	sel	mb1
+	call	clearall
+	sel	mb0
+	bcall	levelscreen		; display level intro screen
+	sel	mb1
+	call	clearall
+
+	; test for VP+ G7400 mode
+	sel	mb0
+	call	extramenable
+	sel	mb1
+	mov	r0,#eram_plusmode
+	movx	a,@r0
+	jz	.no7400
+	bcall	levelplus		; set Videopac+ gfx
+.no7400
+	call	initlvl			; initialise level data
+	call	gameplay		; play
+	jnz	.over			; lost, GAME OVER
+	call	clearall
+	bcall	bonusscreen		; handle bonus
+	sel	mb0
+	; advance level
+	mov	r0,#iram_level
+	inc	@r0
+	mov	a,@r0
+	xrl	a,#7			; maxlevel
+	jz	.maxlevel
+	jmp	.level
+.maxlevel
+	mov	@r0,a			; A==0
+	; increase game completion variable
+	mov	r0,#eram_completion
+	movx	a,@r0
+	add	a,#DIFF_COMPLETE
+	jnc	.scmplt
+	; eram_completion wrap around
+	mov	a,#0ffh
+.scmplt	movx	@r0,a
+	jmp	.level
+
+.over	; lost, GAME OVER
+	call	clearall
+	sel	mb0
+	bcall	gameoverb3		; display "GAME OVER"
+	jmp	.title			; restart at title screen
+
+	endsection main
+
+; move aliens
+; only execute on even frames
+; if eram_slowdown is set run only every 4th frame (on 0)
+movealiens
+	section movealiens
+	; skip routine on odd frames
+	mov	r0,#eram_timel
+	movx	a,@r0
+	cpl	a
+	jb0	.move1			; even frame
+.ret	ret
+
+.move1	jb1	.move2			; frame 0 of 4, run always
+	; check slowdown variable on frame 2 of 4
+	mov	r0,#eram_slowdown
+	movx	a,@r0
+	jnz	.ret
+
+.move2	; do the movement
+	mov	r0,#iram_alien0_t
+.loop	mov	a,@r0
+	anl	a,#0fch			; clear frame counter part
+	mov	r6,a			; store type
+	jb7	.next1			; exploding alien
+	jz	.next1			; empty alien
+	call	.doit			; move alien
+.next1	inc	r0
+	inc	r0
+	inc	r0
+	mov	a,r0
+	xrl	a,#iram_alien2_t+3	; last alien finished?
+	jnz	.loop
+	ret
+
+; move alien: add speeds
+.doit	; add y speed
+	movx	a,@r0		; eram_alien?_v == iram_alien?_t
+	mov	r7,a
+	anl	a,#00fh		; mask out vy (4 bits)
+	sel	mb1
+	call	signexpand
+	inc	r0		; iram_alien?_y
+	add	a,@r0		; add vy
+	mov	@r0,a		; and put it back
+	; add x speed
+	mov	a,r7
+	anl	a,#0f0h		; mask out vx (4 bits)
+	swap	a		; into lowest 4 bits
+	call	signexpand
+	sel	mb0
+	inc	r0		; x position
+	add	a,@r0		; add vx
+	mov	@r0,a		; and put it back
+	dec	r0		; y position
+	; handle direction changes per alien type
+	mov	a,r6		; type from begin of loop
+	rr	a
+	rr	a
+	add	a,#lo(.movetab)-1
+	jmp	.tomove		; page break ahead
+
+.tomove	jmpp	@a
+
+; table with jumps to alien movement routine
+.movetab
+	db	lo(.toufo)
+	db	lo(.todisc)
+	db	lo(.tobomb)
+	db	lo(.torand)
+	db	lo(.toatck)
+	db	lo(.toboom)
+
+.toufo	jmp	moveufo
+.todisc	jmp	movedisc
+.tobomb	jmp	movebomb
+.torand	jmp	moverand
+.toatck	jmp	moveatck
+.toboom	jmp	moveboom
+
+	assert	"hi(.movetab-1) == hi($)"	; -1 for adr of jmpp
+	endsection movealiens
+
+;## create alien shots, only at frames 1/2/3 of 8
+alienshoot
+	section alienshoot
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#7
+	IFNDEF	DEBUG_ASHOTS		; never shoot in ashot debugging
+	jnz	.cont
+	ELSE
+	nop
+	nop
+	ENDIF
+.ret	ret				; skip if 0
+.cont	jb2	.ret			; skip if 4-7
+	; get pointer to alien
+	dec	a			; 0/1/2
+	mov	r0,a
+	rl	a			; *2
+	add	a,r0			; *3
+	add	a,#iram_alien0_t
+	mov	r0,a			; iram_alien?_t
+	; check for empty/exploding alien
+	mov	a,@r0
+	anl	a,#0fch			; clear frame counter part
+	mov	r6,a			; store type
+	jb7	.ret			; exploding alien
+	jz	.ret			; empty alien
+	; get shooting parameters, different for each type
+	mov	r6,#001h		; default to normal shot speed
+	rr	a
+	rr	a
+	add	a,#lo(.shoottab-1)
+	jmpp	@a
+
+; table to handle shooting parameters for each alien
+.shoottab
+	db	lo(.toufo)
+	db	lo(.todisc)
+	db	lo(.tobomb)
+	db	lo(.torand)
+	db	lo(.toatck)
+	db	lo(.toboom)
+
+.toufo	jmp	.ufo
+.todisc	jmp	.disc
+.tobomb	jmp	.bomb
+.torand	jmp	.rand
+.toatck	jmp	.attack
+.toboom	jmp	.boom
+
+	assert	"hi(.shoottab-1)==hi($)"	; -1 for adr of jmpp @a
+
+; routines to handle shooting parameters for each alien
+.ufo	; ALN_UFO
+	mov	r7,#007h	; probability value
+	jmp	.grval		; continue
+
+.disc	; ALN_DISC
+	mov	r7,#009h	; probability value
+	jmp	.grval		; continue
+
+.bomb	; ALN_BOMBER
+	mov	r7,#0ffh	; shoot wheneven possible
+	mov	r6,#002h	; fast shot speed
+	jmp	.grval		; continue
+
+.rand	; ALN_RANDOM, shoot when ship under alien
+	; compare y positions
+	inc	r0		; iram_alien?_y
+	mov	a,@r0
+	cpl	a
+	inc	a		; -y(alien)
+	mov	r1,#iram_ship_y
+	add	a,@r1		; y(ship)-y(alien)
+	add	a,#0f0h		; compensate alien height
+	jb7	.normshot	; ship not under alien
+	; compare x positions
+	inc	r0
+	mov	a,@r0		; iram_alien?_x
+	dec	r0		; iram_alien?_y
+	cpl	a
+	inc	a		; -x(alien)
+	mov	r1,#iram_ship_x
+	add	a,@r1		; x(ship)-x(alien)
+	add	a,#8h
+	add	a,#0efh
+	jc	.normshot	; x(ship)-x(alien) outside -8/8 range
+	; alien above ship, fire always
+	mov	r7,#0ffh
+	dec	r0		; iram_alien?_t
+	jmp	.grval		; continue
+.normshot
+	mov	r7,#005h	; normal shooting probability
+	dec	r0		; iram_alien?_t
+	jmp	.grval		; continue
+
+; ALN_ATTACK, shoot when y == low y  && eram_alien?_a == 2
+; This alien can't be used if targets are outside the LEFTX/RIGHTX range.
+; This alien can't be used if there are visible fixed objects.
+.attack	section attack
+	inc	r0		; eram_alien?_a
+	movx	a,@r0
+	xrl	a,#2
+	jz	.atmode
+	ret			; do not shoot
+.atmode	; check y position
+	mov	a,@r0		; iram_alien?_y
+	xrl	a,#BOTALIENY
+	jz	.posok		; y position reached
+	ret			; do not shoot
+.posok	mov	a,#3
+	movx	@r0,a		; set switch mode
+	mov	r7,#0ffh	; shoot always
+	dec	r0		; iram_alien?_t
+	jmp	.grval		; continue
+	endsection attack
+
+.boom	; ALN_BOOMERANG
+	mov	r7,#00ch	; probability value
+	jmp	.grval		; continue
+
+; all parameter routines continue here
+.grval	; probability value for shot in r7
+	; add eram_completion, max out at 0ffh
+	mov	r1,#eram_completion
+	movx	a,@r1
+	add	a,r7
+	jnc	.noflow
+	mov	a,#0ffh
+.noflow	mov	r7,a
+	; decide if shooting
+	bcall	getrandbyteb3
+	add	a,r7
+	jc	.shoot
+	ret			; decided against shooting
+.shoot	; find free shot
+	mov	r1,#iram_ashot0_y
+	mov	r3,#3
+.shloop	mov	a,@r1
+	xrl	a,#0f8h
+	jz	.fresht		; free shot found
+	inc	r1
+	inc	r1
+	djnz	r3,.shloop
+	ret			; no shots free
+
+; Current register contents:
+;  R0 iram_alien?_t, alien that is shooting
+;  R1 iram_ashot?_y, ashot to be fired
+;  R6 speed of ashot to be fired
+.fresht	; free shot found, check for overlaps
+	inc	r0		; iram_alien?_y
+	inc	r0		; iram_alien?_x
+	mov	a,@r0
+	mov	r7,a		; x position to check
+	dec	r0
+	mov	a,r0
+	mov	r5,a		; store iram_alien?_y
+	mov	r0,#iram_ashot0_x
+	mov	r4,#3
+.lplap	mov	a,@r0		; x position of other shot
+	xrl	a,#0f8h
+	jz	.nxlap		; empty shot, no overlap
+	; check for overlap
+	mov	a,@r0		; x position of other shot
+	cpl	a
+	inc	a
+	add	a,r7		; x(new shot)-x(other shot), 0f8h-008h overlaps
+	add	a,#8		; 000h-010h overlaps
+	add	a,#0efh
+	jc	.nxlap
+	ret			; overlap found, don't shoot
+.nxlap	inc	r0		; iram_ashot?_y
+	inc	r0		; next iram_ashot?_x
+	djnz	r4,.lplap
+
+	; no overlap, finally fire!
+	mov	a,r5
+	mov	r0,a		; iram_alien?_y
+	mov	a,@r0
+	add	a,#004h		; shot starts under alien
+	mov	@r1,a
+	inc	r0		; iram_alien?_x
+	dec	r1		; iram_ashot?_x == eram_ashot?_v
+	mov	a,@r0
+	mov	@r1,a
+	; set speed
+	mov	a,r6
+	movx	@r1,a
+	ret			; finished
+	endsection alienshoot
+
+; For all alien movement routines:
+; Input:
+;  R0 pointer to alien?_y
+; Output
+;  R0 pointer to alien?_t, R0-1
+; Preserve:
+;  R2 used as loop counter
+
+; move ufo alien
+moveufo	section moveufo
+	inc	r0			; alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	dec	r0			; alien?_y
+	dec	r0			; alien?_t
+	ret
+	endsection moveufo
+
+; move disc alien
+movedisc section movedisc
+	mov	r6,#TOPY
+	mov	r7,#BOTALIENY-10	; leave more room, easier levels 6/7
+	call	bouncey
+	inc	r0			; alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	dec	r0			; alien?_y
+	dec	r0			; alien?_t
+	ret
+	endsection movedisc
+
+movebomb section movebomb
+	; test for legal x position, 08h-092h
+	inc	r0		; iram_alien?_x
+	mov	a,@r0
+	add	a,#0f8h		; ok: 00-8a
+	add	a,#075h
+	jc	.off
+	dec	r0		; iram_alien?_y
+	dec	r0		; iram_alien?_t
+	ret
+.off	; turn off alien and prepare for new: type 0, respawn 0, positions 0f8h
+	mov	@r0,#0f8h	; clear x
+	dec	r0		; iram_alien?_y
+	mov	@r0,#0f8h	; clear y
+	dec	r0		; iram_alien?_t, eram_alien?_v
+	clr	a
+	movx	@r0,a		; respawn=0, need to decide about new alien
+	mov	@r0,a		; type to empty alien
+	ret
+	endsection movebomb
+
+; move ALN_RANDOM, bounce on all sides, change direction every random frames
+; the number of frames until the next direction change is in eram_alien?_a
+moverand section moverand
+	; first bounce to make position legal
+	mov	r6,#TOPY
+	mov	r7,#BOTALIENY
+	call	bouncey
+	inc	r0			; iram_alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	dec	r0			; iram_alien?_y
+	; check if direction shall change
+	movx	a,@r0			; eram_alien?_a
+	dec	a
+	jz	.change
+	movx	@r0,a			; new counter value eram_alien?_a
+	dec	r0			; iram_alien?_t
+	ret
+.change	; change direction
+	; get new time for this direction
+	bcall	getrandbyteb3
+	movx	@r0,a			; eram_alien?_a
+.getdir	bcall	getrandbyteb3
+	anl	a,#007h
+	add	a,#lo(.dirtab)
+	movp	a,@a
+	jz	.getdir			; until direction legal
+	dec	r0
+	movx	@r0,a			; eram_alien?_v
+	ret
+; possible directions: right, right+down, ...
+.dirtab	db	010h, 011h, 000h, 0F1h, 0F0h, 0FFh, 000h, 01Fh
+	assert "hi(moverand) == hi($)"
+	endsection moverand
+
+; move attack alien
+moveatck section moveattack
+	; mode dispatcher
+	movx	a,@r0			; eram_alien?_a
+	add	a,#lo(.modtab)
+	jmpp	@a
+
+.modtab	db	lo(.tonorm)
+	db	lo(.toapp)
+	db	lo(.toatt)
+	db	lo(.tosw)
+	db	lo(.toback)
+.tonorm	jmp	.normal
+.toapp	jmp	.approach
+.toatt	jmp	.attack
+.tosw	jmp	.switch
+.toback	jmp	.back
+	assert	"hi(.modtab-1) == hi($)"	; -1 for adr of jmpp @a
+
+; Normal mode, eram_alien?_a = 0
+;  zigzag at top of screen
+;  decide for target at left/right borders
+.normal
+	mov	r6,#TOPY
+	mov	r7,#TOPY+10
+	call	bouncey
+	inc	r0			; iram_alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	; check if borders hit
+	mov	a,@r0			; iram_alien?_x
+	xrl	a,#LEFTX
+	jz	.border
+	mov	a,@r0			; iram_alien?_x
+	xrl	a,#RIGHTX
+	jz	.border
+.noatck	dec	r0			; iram_alien?_y
+	dec	r0			; iram_alien?_t
+	ret
+.border	; just bounced on border, decide about attack
+	bcall	getrandbyteb3
+	jb7	.noatck
+
+	; start attack, try to find targetx, search in eram_charquadx
+	section searchtarget
+.getx	bcall	getrandbyteb3
+	anl	a,#01fh
+	mov	r1,a
+	add	a,#0e8h
+	jc	.getx			; >017h, try again
+	mov	a,r1
+	add	a,#eram_charquadx
+	mov	r1,a			; pointer into target x buffer
+	mov	r7,#24			; search all possible targets
+.loop	movx	a,@r1
+	jnz	.hitit			; found target to hit
+	; target x == 0, no target there
+	inc	r1			; next target x
+	mov	a,r1
+	xrl	a,#eram_charquadx+018h	; check for end of target x buffer
+	jnz	.next
+	mov	r1,#eram_charquadx	; wrap around target x buffer
+.next	djnz	r7,.loop
+	; nothing found, abort attack, should not happen
+	dec	r0			; iram_alien?_y
+	dec	r0			; iram_alien?_t
+	ret
+	endsection searchtarget
+
+.hitit	movx	@r0,a			; eram_alien?_b
+	dec	r0			; eram_alien?_a
+	mov	a,#1
+	movx	@r0,a			; attack mode
+	dec	r0			; eram_alien?_v
+	ret
+
+; Approach mode, eram_alien?_a = 1
+;  continue top zig-zag until target x position is reached
+;  attack mode after reaching target X
+.approach
+	mov	r6,#TOPY
+	mov	r7,#TOPY+10
+	call	bouncey
+	inc	r0			; iram_alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	; check if borders hit
+	movx	a,@r0			; eram_alien?_b
+	xrl	a,@r0			; iram_alien?_x
+	anl	a,#0feh			; ignore lowest bit, speed=2
+	jz	.startattack		; target x position reached
+	dec	r0			; iram_alien?_y
+	dec	r0			; iram_alien?_t
+	ret
+.startattack
+	dec	r0			; eram_alien?_a
+	mov	a,#2			; attack mode
+	movx	@r0,a
+	dec	r0			; iram_alien?_t
+	movx	a,@r0
+	anl	a,#0e0h
+	orl	a,#002h			; new y speed: down
+	movx	@r0,a			; eram_alien?_v
+	ret
+
+; Attack mode, eram_alien?_a = 2
+;  move down, zig-zag in x direction
+;  stop down movement at lowest y position
+.attack
+	mov	r6,#TOPY
+	mov	r7,#BOTALIENY
+	call	bouncey
+	mov	a,@r0			; iram_alien?_y
+	xrl	a,#BOTALIENY
+	jnz	.dox
+	; lowest y position reached, clear y speed
+	dec	r0			; eram_alien?_v
+	movx	a,@r0
+	anl	a,#0f0h
+	movx	@r0,a
+	inc	r0			; iram_alien?_y
+.dox	inc	r0			; iram_alien?_x,eram_alien?_b
+	movx	a,@r0			; target x
+	add	a,#0fch
+	mov	r6,a			; target x - offset
+	add	a,#008h
+	mov	r7,a			; target x + offset
+	call	bouncex
+	dec	r0			; alien?_y
+	dec	r0			; alien?_t
+	ret
+
+; Switch mode, eram_alien?_a = 3
+;  switch to back mode, may be set by shooting routine
+;  to fly back set neg. Y speed
+.switch section switchmode
+	mov	a,#4			; back mode
+	movx	@r0,a			; eram_alien?_a
+	dec	r0			; iram_alien?_t,eram_alien?_v
+	movx	a,@r0
+	orl	a,#00eh			; move up
+	movx	@r0,a
+	ret
+	endsection switchmode
+
+; Back mode, eram_alien?_a = 4
+;  full screen bouncing
+;  normal mode after bounce on top
+.back	section backmode
+	mov	r6,#TOPY
+	mov	r7,#BOTALIENY
+	call	bouncey
+	inc	r0			; iram_alien?_x
+	mov	r6,#LEFTX
+	mov	r7,#RIGHTX
+	call	bouncex
+	dec	r0			; iram_alien?_y
+	; check y for top bounce
+	mov	a,@r0
+	xrl	a,#TOPY
+	jz	.atkend
+	dec	r0			; iram_alien?_t
+	ret
+.atkend	; switch back to normal mode
+	movx	@r0,a			; eram_alien?_a
+	dec	r0			; iram_alien?_t
+	ret
+	endsection backmode
+	endsection moveattack
+
+; move boomerang alien, follow ship
+; set speed to move into ship direction plus offset to x to avoid easy shooting
+moveboom section moveboomerang
+	; check if ship is dead
+	mov	r1,#iram_ship_y
+	mov	a,@r1
+	xrl	a,#0f8h
+	jnz	.alive
+	dec	r0			; iram_alien?_v
+	movx	@r0,a			; stop moving, A is 0
+	ret
+.alive ; limit bottom position
+	mov	r6,#TOPY
+	mov	r7,#BOTALIENY
+	call	bouncey
+	; distance in y direction
+	mov	r1,#iram_ship_y
+	mov	a,@r1
+	cpl	a
+	inc	a
+	add	a,@r0			; y(alien)-y(ship)
+	mov	r4,#0			; no move in y direction
+	jz	.sety
+	mov	r4,#001h		; move down
+	jb7	.sety
+	mov	r4,#00fh		; move up
+.sety 	; no need to bounce on sides:
+	; This alien uses an extended x range to allow staying besides the
+	; ship without the ship being able to shoot it. It starts within these
+	; limits and can not leave them as long as the ship is inside its own
+	; limits. The only time the ship is outside its limits is when it is
+	; dead, but this is checked earlier.
+	inc	r0			; iram_alien?_x
+	; distance in x direction
+	mov	r1,#iram_ship_x		; overwritten by bouncex
+	movx	a,@r0			; eram_alien?_b, x offset to ship
+	add	a,@r1			; ship position
+	cpl	a
+	inc	a
+	add	a,@r0			; x(alien)-x(ship)
+	mov	r3,#0			; no move in x direction
+	jz	.setx
+	mov	r3,#010h		; move right
+	jb7	.setx
+	mov	r3,#0f0h		; move left
+.setx	dec	r0			; iram_alien?_y
+	dec	r0			; iram_alien?_t, eram_alien?_v
+	mov	a,r3
+	orl	a,r4
+	movx	@r0,a			; set speed
+.ret	ret
+	endsection moveboomerang
+
+; support routines for alien movements: bounce on side borders
+bouncex section bouncex
+; Input:
+;  R0 pointer to alien?_x
+;  R6 minimum X
+;  R7 maximum X
+; Preserve:
+;  R0 pointer to alien?_x
+;  R2 used as loop counter in alien movement control loop
+	; test right border
+	mov	a,r7
+	cpl	a
+	inc	a
+	add	a,@r0			; X-max(X)
+	jc	.right			; hit right border
+	; test for left border
+	mov	a,r6
+	cpl	a
+	add	a,@r0			; X-(min(X)-1)
+	jnc	.left			; hit left border
+	ret				; position is ok, finished
+.right	mov	a,r7			; right x position
+	jmp	.bounce
+.left	mov	a,r6			; left x position
+.bounce	; set x position and negate x speed
+	mov	@r0,a			; set it new x position
+	mov	a,r0
+	add	a,#0feh
+	mov	r1,a			; eram_alien?_v
+	movx	a,@r1
+	anl	a,#00fh
+	mov	r7,a			; store old y speed
+	movx	a,@r1
+	swap	a			; x speed is high nibble
+	cpl	a
+	inc	a			; 2's complement
+	swap	a			; back to high nibble
+	anl	a,#0f0h
+	orl	a,r7			; insert old y speed
+	movx	@r1,a			; set new speed
+	ret
+	endsection bouncex
+
+; support routines for alien movements: bounce on top and bottom border
+bouncey section bouncey
+; Input:
+;  R0 pointer to alien?_y
+;  R6 mininum Y
+;  R7 maximum Y
+; Preserve:
+;  R0 pointer to alien?_y
+;  R2 used as loop counter in alien movement control loop
+	; check for top border
+	mov	a,r6
+	cpl	a
+	add	a,@r0
+	jnc	.top			; top border hit
+	; check for bottom border
+	mov	a,r7
+	cpl	a
+	inc	a
+	add	a,@r0
+	jc	.bottom
+	ret				; position ok, finished
+.bottom	; bottom border
+	mov	a,r7
+	jmp	.bounce
+.top	; top border
+	mov	a,r6
+.bounce	; set y position and negate y speed
+	mov	@r0,a			; set y positon
+	mov	a,r0
+	mov	r1,a
+	dec	r1
+	movx	a,@r1			; eram_alien?_v
+	anl	a,#0f0h
+	mov	r7,a			; store x speed
+	movx	a,@r1
+	cpl	a
+	inc	a			; 2's complement
+	anl	a,#00fh
+	orl	a,r7			; insert old x speed
+	movx	@r1,a			; set new speed
+	ret
+	endsection bouncey
+
+; fill in start values at level begin for newalien routine
+initlevelaliens section initlevelaliens
+	mov	r0,#iram_level
+	mov	a,@r0
+	rl	a			; *2
+	rl	a			; *4
+	rl	a			; *8
+	add	a,@r0			; *9
+	add	a,#lo(levelalien)
+	mov	r2,a			; pointer to level data
+	mov	r0,#eram_alienvar	; fill in alien vars
+	mov	r1,#6			; 6 bytes to copy
+.loop1	mov	a,r2			; pointer to ROM table
+	movp	a,@a			; get data
+	movx	@r0,a			; fill in
+	inc	r0			; advance pointer
+	inc	r2			; advance pointer
+	djnz	r1,.loop1
+
+	mov	r0,#eram_alien0_v	; fill in alien spawn data
+	mov	r1,#3			; 3 aliens
+.loop2	mov	a,#0ffh
+	movx	@r0,a			; respawn immediately
+	inc	r0
+	mov	a,r2
+	movp	a,@a
+	movx	@r0,a			; type of alien to respawn
+	inc	r2
+	inc	r0
+	clr	a
+	movx	@r0,a			; currently unused
+	inc	r0
+	djnz	r1,.loop2
+	ret
+	endsection initlevelaliens
+
+; define symbolic alien formations
+
+; 20 ALN_UFO, start with 3 ALN_UFO
+alieninit_justufos macro
+	db	17,0,0,0,0,0
+	db	ALN_UFO, ALN_UFO, ALN_UFO
+	endm
+
+; 30 ALN_DISC, start with 3 ALN_DISC
+alieninit_justdiscs macro
+	db	0,27,0,0,0,0
+	db	ALN_DISC, ALN_DISC, ALN_DISC
+	endm
+
+; 20 ALN_UFO, 15 ALN_DISC, 2 ALN_BOMBER
+alieninit_ufodiscs macro
+	db	20,12,2,0,0,0
+	db	ALN_DISC, ALN_DISC, ALN_DISC
+	endm
+
+; 20 ALN_UFO, 20 ALN_DISC, 10 ALN_ATTACK
+alieninit_introattack macro
+	db	19,19,0,0,9,0
+	db	ALN_UFO, ALN_DISC, ALN_ATTACK
+	endm
+
+; 20 ALN_UFO, 25 ALN_DISC, 10 ALN_BOOMERANG
+alieninit_introboom macro
+	db	19,24,0,0,0,9
+	db	ALN_UFO, ALN_DISC, ALN_BOOMERANG
+	endm
+
+; 20 ALN_UFO, 30 ALN_DISC, 10 ALN_RANDOM
+alieninit_introrand macro
+	db	19,29,0,9,0,0
+	db	ALN_UFO, ALN_DISC, ALN_RANDOM
+	endm
+
+; 15 BOOMERANG single, 15 RANDOM, 20 DISC
+alieninit_difficult macro
+	db	0,20,0,13,0,14
+	db	ALN_BOOMERANG, ALN_RANDOM, ALN_RANDOM
+	endm
+
+levelalien
+	alieninit_1
+	assert	"$ - levelalien == 9"
+	alieninit_2
+	assert	"$ - levelalien == 18"
+	alieninit_3
+	assert	"$ - levelalien == 27"
+	alieninit_4
+	assert	"$ - levelalien == 36"
+	alieninit_5
+	assert	"$ - levelalien == 45"
+	alieninit_6
+	assert	"$ - levelalien == 54"
+	alieninit_7
+	assert	"$ - levelalien == 63"
+
+	assert "hi(initlevelaliens) == hi($-1)"
+
+; reset shot speed to normal value after some time, executed every 16th frame on 0
+fastshotexpire section fastshotexpire
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#0fh
+	jz	.doit
+.ret	ret
+.doit	; check if timer is running
+	mov	r0,#eram_shottime
+	movx	a,@r0
+	jz	.ret			; timer is 0, not active
+	dec	a
+	movx	@r0,a
+	jnz	.ret			; timer has not reached 0 yet
+	; play sound
+	mov	a,#lo(tune_powerend)
+	call	playsound
+	; change color of shield bar back to white
+	mov	r0,#iram_color2
+	mov	a,#col_grd_white
+	orl	a,@r0
+	mov	@r0,a
+	; timer expired, restore shot speed
+	jmp	initshotspeed
+	endsection fastshotexpire
+
+; set initial shot speed multi, 1 for first time, 0 for rest
+initshotspeed section initshotspeed
+	mov	r0,#eram_shotmulti
+	mov	r1,#eram_completion
+	movx	a,@r1
+	mov	r2,#1			; shot speed for first time
+	jz	.set
+	mov	r2,#0			; shot speed for game completed once
+.set	mov	a,r2
+	movx	@r0,a
+	ret
+	endsection initshotspeed
+
+; here starts bank3 MB1 ------------------------------------------------------
+
+	org	0800h			; bank3/mb1
+
+	include	"switchmb1.h"		; bank switch table for mb0
+
+	org	084ch
+
+; NOTE:
+; The main display kernel is unconventional: I need all time I can get to
+; draw all the game objects. So I start drawing the targets just after
+; the last rasterline with "SCORE:" in it is displayed. This is done by setting
+; the ictrl_bottom flag in the second lineirq routine. The VSYNC now happens
+; somewhere inside the drawtargets routine. The defense ship, the aliens and
+; all shots are drawn within the VSYNC irq routine. So when the drawtargets
+; routine ends all vdc registers are filled with all game objects. While the
+; vdc displays them I can run the control routines and move them for the next
+; frame. After that all I can do is wait for the next raster irq. That draws
+; the current score / lifecounter and sets the ictrl_bottom flag and everything
+; starts again.
+; One problem is that vsync interrupts can get lost while interrupts are
+; disabled. But all aliens, shots and the ship are drawn in the vsync routine.
+; So I can't disable the interrupts anywhere, this includes calls to
+; gfxon/gfxoff. YES, THIS DID HAPPEN IN MY TESTS.
+gameplay section gameplay
+	; sync with screen
+	mov	r0,#iram_ictrl
+	dis	i
+	mov	a,@r0
+	anl	a,#0ffh - ictrl_bottom
+	mov	@r0,a
+	en	i
+.waitbottom
+	mov	a,@r0
+	anl	a,#ictrl_bottom
+	jz	.waitbottom
+
+	clr	f1			; clear vsync flag
+
+	; foreground gfx and grid off
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+
+	mov	r0,#vdc_control
+	movx	a,@r0
+	anl	a,#0d7h
+	movx	@r0,a
+
+	; draw targets
+	bcall	drawtargets
+
+	IFDEF DEBUG_RASTER
+	mov	r0,#vdc_color
+	mov	a,#col_bck_red | col_grd_white
+	movx	@r0,a
+	ENDIF
+
+	; set the ship shape
+	call	setshipshape
+
+	; wait for vsync
+.synclp	jf1	.synced			; end loop when flag set
+	jmp	.synclp
+.synced
+
+	; enable foreground gfx, grid still off
+	mov	r0,#vdc_control
+	movx	a,@r0
+	orl	a,#020h		; foreground on
+	movx	@r0,a
+
+	IFDEF DEBUG_RASTER
+	mov	r0,#vdc_color
+	mov	a,#col_bck_yellow | col_grd_white
+	movx	@r0,a
+	ENDIF
+
+	; set collision register
+	mov	r0,#vdc_collision
+	mov	a,#vdc_coll_spr0
+	movx	@r0,a
+
+	; Clear dirty flag, no need for dis/en protection, IRQ executed only
+	; some cycles before.
+	mov	r0,#iram_ictrl		; control register
+	mov	a,@r0
+	anl	a,#0ffh - ictrl_dirty	; clear dirty flag
+	mov	@r0,a			; reset dirty flag
+
+	; set grid to show shield strength
+	section gridshield
+	mov	r0,#vdc_gridh0
+	mov	r1,#iram_shield
+	mov	a,@r1
+	jz	.empty			; no shield left, lost
+	mov	r2,a
+	; set some of the hgrid
+.loop	movx	a,@r0
+	orl	a,#080h			; set shield
+	movx	@r0,a
+	inc	r0
+	djnz	r2,.loop
+	; now clear rest of hgrid
+.empty	movx	a,@r0
+	anl	a,#07fh			; clear shield
+	movx	@r0,a
+	inc	r0
+	mov	a,r0
+	xrl	a,#vdc_gridh8+1
+	jnz	.empty
+	endsection gridshield
+
+	; enable grid+fill mode
+	mov	r0,#vdc_control
+	movx	a,@r0
+	orl	a,#088h
+	movx	@r0,a
+
+	; switch to extram
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0afh	; ... extram
+
+	; if frame % 6 == 5 then drop frame on NTSC
+	section ntscframedrop
+	mov	r0,#eram_frame
+	movx	a,@r0		; frame drop counter
+	inc	a
+	movx	@r0,a
+	xrl	a,#6
+	jnz	.end		; frames 0-4, don't drop
+	movx	@r0,a		; store 0 as frame drop counter
+	mov	r0,#iram_palflag
+	mov	a,@r0
+	jnz	.end		; PAL, don't drop
+	IFDEF NTSCDROP
+	jmp	gameplay	; drop frame
+	ELSE
+	nop
+	nop
+	ENDIF
+.end	endsection ntscframedrop
+
+	; advance time
+	mov	r0,#eram_timel
+	movx	a,@r0
+	inc	a
+	movx	@r0,a
+
+	;## check joystick and update ship position
+	section joystick
+	; check the joystick
+	section checkstick
+	; run in STATE_PLAY/STATE_DEAD
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jz	.cont0
+	mov	a,@r0
+	xrl	a,#STATE_DEAD
+	jz	.cont0
+	jmp	.joyend
+.cont0	; control vx,vy with joystick (max -1/1)
+	mov	r1,#0			; first joystick
+	sel	mb0
+	; I have to do the first part of the getjoystick routine here,
+	; because the original routine sets P17.
+	; begin of getjoystick routine
+	; This is from the Videopac+ BIOS, it is backwards compatible to the
+	; non-plus version.
+	in	a,P1
+	mov	r0,a
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0bbh		; ... keyboard
+	call	0395h			; rest of getjoystick
+	; clear y if +1
+	mov	a,r3			; get y offset
+	mov	r7,a			; store for later
+	dec	a			; now 0 if +1
+	jnz	.yok			; was not +1
+	mov	r3,a			; A=0
+.yok	mov	a,r2			; x offset
+	orl	a,r3			; y offset
+	jz	.end			; test for neutral
+	; set the shape
+	call	decodejoystick		; decode joystick
+	mov	a,r7			; get old y ...
+	mov	r3,a			; ... and restore it
+	mov	a,r1			; get shape
+	mov	r1,#iram_ship_shape	; store it for irq
+	mov	@r1,a
+.end	sel	mb1
+	endsection checkstick
+
+	; add speed values to defense ship position
+	section shipspeed
+	; x speed
+	mov	a,r2			; get x speed
+	mov	r1,#iram_ship_x
+	add	a,@r1
+	mov	@r1,a
+	; y speed
+	mov	a,r7			; get y speed
+	clr	c			; new bit is 0
+	rlc	a			; double it, can be negative
+	mov	r1,#iram_ship_y
+	add	a,@r1
+	mov	@r1,a
+	endsection shipspeed
+
+	; check for legal ship position and correct it
+shipcheck
+	section shipcheck
+	; x position
+	mov	r0,#iram_ship_x		; x position
+	mov	a,@r0			; get
+	add	a,#0ffh-RIGHTX		; test if right border
+	jnc	.noright		; no, skip to test for left
+	mov	@r0,#RIGHTX
+.tocky	jmp	.checky			; x position now ok, check y
+.noright
+	mov	a,@r0			; get x position
+	add	a,#0100h-LEFTX		; test if left border
+	jc	.tocky			; check y, page ALIGNMENT ahead
+	mov	@r0,#LEFTX
+
+.checky	; check top border
+	mov	r1,#iram_ship_y		; get y position
+	mov	a,@r1
+	add	a,#0100h-TOPY		; if 00-1c top border
+	jc	.notop
+	; top border
+	mov	@r1,#TOPY
+	jmp	.joyend
+
+.notop	; check bottom border
+	call	getmaxshipy
+	mov	r0,a
+	mov	a,@r1			; get y pos
+	add	a,r0
+	jnc	.joyend
+	; bottom border
+	mov	a,r0
+	cpl	a
+	mov	@r1,a
+	endsection shipcheck
+.joyend	endsection joystick
+
+	;## handle defense shot
+	section defshot
+	; not allowed to fire when not in STATE_PLAY
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jz	.cont0
+	jmp	.end
+.cont0	sel	mb1
+	; check for fire rate
+	mov	r0,#iram_firelimit
+	mov	a,@r0
+	jz	.cont1			; limit over, allow fireing
+	dec	a			; limit not over, reduce it
+	mov	@r0,a
+	jf0	.toend			; in limit, button still pressed->end
+	mov	@r0,#0			; fire button released, clear limit
+	jmp	.end			; finished for now
+.cont1	jf0	.fire			; test fire button
+.toend	jmp	.end
+.fire	; set fire rate limit
+	mov	@r0,#25
+	; test, if park position
+	mov	r0,#iram_shipshot_y
+	mov	a,@r0
+	xrl	a,#0f8h			; no parking if y!=0f8h
+	jz	.cont2
+	jmp	.end
+.cont2
+	; fire button pressed, no old shot: start new shot
+	; adjust positions depending on shape
+	call	getdefenseshottable
+	; set and adjust x position
+	mov	a,r2			; x offset of shot
+	mov	r0,#iram_ship_x
+	mov	r1,#iram_shipshot_x
+	add	a,@r0
+	mov	@r1,a			; set shot x position
+	; set and adjust y position
+	mov	a,r3			; y offset of shot
+	inc	r0
+	dec	r1
+	add	a,@r0
+	mov	@r1,a			; iram_shipshot_y
+	; set speed of defense shot
+	mov	a,r4			; speed value from getdefenseshottable
+	inc	r1
+	inc	r1
+	mov	@r1,a			; iram_shipshot_v
+.end	endsection defshot
+
+	;## defense shot: movement
+	; x position
+	mov	r0,#iram_shipshot_v
+	mov	a,@r0
+	mov	r7,a
+	anl	a,#0f0h			; mask out vx (4 bits)
+	swap	a			; into lowest 4 bits
+	call	signexpand
+	dec	r0			; x position
+	add	a,@r0			; add vx
+	mov	@r0,a			; and put it back
+	; y position
+	mov	a,r7
+	anl	a,#00fh			; mask out vy (4 bits)
+	call	signexpand
+	dec	r0			; y position
+	add	a,@r0			; add vy
+	mov	@r0,a			; and put it back
+
+	;## defense shot: test for legal positions
+	section checkshot
+	; x position: from LEFTX to RIGHTX
+	mov	r0,#iram_shipshot_x
+	mov	a,@r0
+	add	a,#100h-LEFTX
+	add	a,#0ffh-(RIGHTX-LEFTX)
+	jc	.park
+	; y position: below TOPY, can't shoot down
+	mov	r0,#iram_shipshot_y
+	mov	a,@r0
+	add	a,#100h-TOPY
+	jnc	.park
+	jmp	.end
+.park	; park motionless
+	mov	r0,#iram_shipshot_y
+	mov	@r0,#0f8h		; shipshot_y
+	inc	r0
+	mov	@r0,#0f8h		; shipshot_x
+	inc	r0
+	mov	@r0,#0			; shipshot_v
+.end	endsection checkshot
+
+	call	animaliens
+	bcall	endofexplosion
+	sel	mb0
+	bcall	respawn
+	call	movealiens
+	call	alienshoot
+	sel	mb1
+
+	;## check for level finished: all aliens dead
+	section levelwin
+	; check game state
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jz	.cont0
+	jmp	.end			; not in STATE_PLAY, can't win any more
+
+	; check for active aliens
+	; alien==0 && respawn==0 means no more aliens available
+.cont0	mov	r0,#iram_alien0_t
+	mov	r2,#3
+.loop1	mov	a,@r0
+	anl	a,#0fch
+	jz	.cont1			; alien empty
+	jmp	.end			; non-empty alien found, still playing
+.cont1	; check for active respawn counters
+	movx	a,@r0
+	jz	.cont2			; respawn counter empty
+	jmp	.end			; new alien will spawn here soon, play
+.cont2	inc	r0
+	inc	r0
+	inc	r0
+	djnz	r2,.loop1
+
+	; check for active ashots
+	mov	r0,#iram_ashot0_y
+	mov	r2,#3
+.loop2	mov	a,@r0
+	xrl	a,#0f8h
+	jz	.cont3			; ashot inactive
+	jmp	.end			; active ashot found, play
+.cont3	inc	r0
+	inc	r0
+	djnz	r2,.loop2
+
+	; now check if all aliens have spawned off
+	mov	r1,#eram_alienvar
+	mov	r2,#8
+.loop3	movx	a,@r1
+	jnz	.end			; still aliens left, play
+	inc	r1
+	djnz	r2,.loop3
+
+	; we have won this level:
+	;  all aliens are empty
+	;  no spawns planned
+	;  all ashots are gone
+	;  no more spawns possible
+	clr	a
+	ret
+.end	endsection levelwin
+
+	;## check if still targets left
+	section levellostcall
+	call	levellosttargets
+	IFDEF	CHEAT_TARGETS
+	nop
+	ELSE
+	jnz	.cont0
+	ENDIF
+	jmp	.end
+.cont0	; only check in STATE_PLAY/STATE_DEAD
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jz	.cont1
+	mov	a,@r0
+	xrl	a,#STATE_DEAD
+	jz	.cont1
+	jmp	.end
+.cont1	; switch to STATE_END
+	mov	@r0,#STATE_END
+	; set wait
+	mov	r1,#iram_firelimit
+	mov	@r1,#200
+	; play tune
+	mov	a,#lo(tune_levelempty)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; remove ship
+	mov	r1,#iram_ship_x
+	mov	@r1,#0f8h
+	inc	r1
+	mov	@r1,#0f8h		; iram_ship_y
+.end	endsection levellostcall
+
+	jmp	moveshots		; page border follows
+
+	org	09eeh
+
+moveshots
+	; move alien shots
+	; only run on odd frames
+	; if slowdown is set run only on frame 3 of 4
+	; collision and position checks are done in checktargets
+	section moveshots
+	mov	r0,#eram_timel
+	movx	a,@r0
+	jb0	.move1
+.toend	jmp	.end			; never run on even frame
+
+.move1	jb1	.move2			; always run on frame 3 of 4
+	; check slowdown variable on frame 1 of 4
+	mov	r0,#eram_slowdown
+	movx	a,@r0
+	jnz	.toend
+
+.move2	; move y position
+	mov	r0,#iram_ashot0_x
+	mov	r2,#3
+.loop	mov	a,@r0
+	xrl	a,#0f8h
+	jz	.next			; skip empty
+
+	; move in y direction, x position is fixed
+	movx	a,@r0			; eram_ashot?_v
+	anl	a,#00fh			; mask out vy (4 bits)
+	call	signexpand
+	inc	r0			; iram_ashot?_y
+	add	a,@r0			; add vy
+	mov	@r0,a			; and put it back
+	dec	r0
+
+.next	; next shot
+	inc	r0
+	inc	r0
+	djnz	r2,.loop
+.end	endsection moveshots
+
+	; hit targets with ashots
+	call	checktargets
+	; collect power-up by ship contact
+	bcall	powerupcollect
+	; handle power-up disappering
+	call	powerupexpire
+	; expire shot speed changes
+	sel	mb0
+	call	fastshotexpire
+	sel	mb1
+	; expire alien slow down
+	bcall	slowdownexpire
+
+	;## collision handling ship/rest, game over
+	section shipcollision
+	; only check collision in STATE_PLAY
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jz	.cont1
+	jmp	.end
+.cont1	; read collisions
+	mov	r0,#iram_collision
+	mov	a,@r0
+	anl	a,#0ffh - vdc_coll_ext - vdc_coll_vgrd	; remove VP+ gfx collisions
+	mov	r7,a
+	; clear collision bits for exploding aliens
+	mov	r0,#iram_alien0_t
+	mov	a,@r0
+	anl	a,#0fch			; mask out frames
+	jz	.ign1			; empty alien, ignore hits
+	jb7	.ign1			; exploding alien, ignore hits
+	jmp	.noexp1
+.ign1	mov	a,r7
+	anl	a,#0ffh - vdc_coll_spr1	; clear collision bit for alien0
+	mov	r7,a
+.noexp1	mov	r0,#iram_alien1_t
+	mov	a,@r0
+	anl	a,#0fch			; mask out frames
+	jz	.ign2			; empty alien, ignore hits
+	jb7	.ign2			; exploding alien, ignore hits
+	jmp	.noexp2
+.ign2	mov	a,r7
+	anl	a,#0ffh - vdc_coll_spr2	; clear collision bit for alien1
+	mov	r7,a
+.noexp2	mov	r0,#iram_alien2_t
+	mov	a,@r0
+	anl	a,#0fch			; mask out frames
+	jz	.ign3			; empty alien, ignore hits
+	jb7	.ign3			; exploding alien, ignore hits
+	jmp	.noexp3
+.ign3	mov	a,r7
+	anl	a,#0ffh - vdc_coll_spr3	; clear collision bit for alien2
+	mov	r7,a
+.noexp3	mov	a,r7			; collision register without explosions
+	jnz	.dead			; != 0, we have collided
+	jmp	.end			; nothing in out way, end
+.dead	; set state to dead
+	mov	r0,#iram_gamestate
+	mov	@r0,#STATE_DEAD
+	mov	r1,#iram_firelimit
+	mov	@r1,#30			; time until control works again
+	mov	a,#tune_alarm
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; reduce shield strength
+	mov	r1,#iram_shield
+	mov	a,@r1
+	IFDEF	CHEAT_SHIELD
+	nop
+	ELSE
+	dec	a
+	ENDIF
+	mov	@r1,a
+	jnz	.bombck			; was not last life, check for bomb
+	; shield empty, switch into STATE_EXP
+	mov	@r0,#STATE_EXP
+	; play ship explosion sound
+	mov	a,#lo(tune_shieldempty)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; set shape frame
+	mov	r1,#iram_firelimit
+	mov	@r1,#0
+.bombck	; check if collision target was an alien shot
+	mov	r0,#iram_collision
+	mov	a,@r0
+	anl	a,#vdc_coll_char
+	jz	.end
+	call	killashot		; remove alien shot
+.end	endsection shipcollision
+
+	; activate to adjust target hit parameters
+	IFDEF DEBUG_ASHOTS
+	call	debug_keycontrol
+	ELSE
+	nop
+	nop
+	ENDIF
+
+	; active powerup tests
+	IFDEF DEBUG_POWERUP
+	call	debug_power
+	ELSE
+	nop
+	nop
+	ENDIF
+
+	; check for active defense shot
+	section defshotcheck
+	mov	r0,#iram_shipshot_x
+	mov	a,@r0
+	xrl	a,#0f8h
+	jnz	.docollision
+	jmp	.noshotcheck
+
+.docollision
+	section alienkillcheck
+	;## collision handling: aliens/defense shot
+	; There are no overlapping problems here, so the hit range can be small.
+	mov	r0,#iram_alien0_t
+	mov	r1,#iram_shipshot_y
+	mov	r2,#3
+
+.loop	; check for empty/exploding alien
+	mov	a,@r0
+	inc	r0
+	anl	a,#0fch			; ignore framecounter
+	jb7	.next1			; explosion flag set, ignore
+	jnz	.cont1			; type != 0, process it
+.next1	inc	r0
+.next2	inc	r0
+	djnz	r2,.loop
+	jmp	.end
+
+.cont1	; check y positions
+	mov	a,@r0
+	inc	r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shot)-y(alien)
+	;Y: fe-0e means collision
+	add	a,#002h			; 0-10h == hit
+	add	a,#0efh
+	jnc	.cont2
+	jmp	.next2			; missed alien
+.cont2	; check x positions
+	mov	a,@r0
+	cpl	a
+	inc	a
+	inc	r1
+	add	a,@r1			; x(shot)-x(alien)
+	dec	r1
+	;X: fc-04 means collision
+	add	a,#4 			; 0-8h == hit
+	add	a,#0f7h
+	jnc	.killit			; hit it
+	jmp	.next2			; missed alien
+
+.killit	; kill alien
+	; play explosion sound
+	mov	a,#lo(tune_alienkill)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; stop defense shot
+	mov	@r1,#0f8h		; y position
+	inc	r1
+	mov	@r1,#0f8h		; x position
+	inc	r1
+	mov	@r1,#0			; speed
+	; set alien type to explosion, first frame
+	dec	r0
+	dec	r0
+	mov	a,@r0			; alien type
+	anl	a,#0fch			; clear frame counter part
+	mov	r7,a			; store type for later
+	orl	a,#080h			; set explosion flag
+	mov	@r0,a
+	mov	a,r7			; get type from above
+	rr	a
+	rr	a			; shift away frame counter info
+	call	addscore
+	; alien is killed, shot is gone, no more checks necessary
+.end	endsection alienkillcheck
+
+	;## collision handling ashots/shot
+	section ashotkillcheck
+	mov	r0,#iram_ashot0_y
+	mov	r1,#iram_shipshot_y
+	mov	r2,#3
+.loop	; check for empty shot
+	mov	a,@r0
+	xrl	a,#0f8h
+	jnz	.cont1			; handle non empty shots
+.next1	inc	r0
+	inc	r0
+	djnz	r2,.loop
+	jmp	.end
+
+.cont1	mov	a,@r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shipshot)-y(ashot)
+	; Y: 0fdh-00ch flickers, collision range 0fch-00dh
+	add	a,#004h			; 0-11h == hit
+	add	a,#0edh
+	jnc	.yhit
+	jmp	.next1			; missed ashot
+.yhit	; check x position
+	dec	r0			; iram_ashot?_x
+	mov	a,@r0
+	inc	r0			; iram_ashot?_y
+	cpl	a
+	inc	a
+	inc	r1
+	add	a,@r1			; x(shipshot)-x(ashot)
+	dec	r1
+	; X: 0fbh-005h flickers, collision
+	add	a,#005h			; 0-00ah == hit
+	add	a,#0f5h
+	jnc	.hit
+	jmp	.next1			; missed ashot
+.hit	; clear defense shot
+	mov	r1,#iram_shipshot_y
+	mov	@r1,#0f8h
+	inc	r1
+	mov	@r1,#0f8h
+	; see if it was a power-up
+	dec	r0			; iram_ashot?_x
+	mov	r1,#eram_powerup
+	movx	a,@r1
+	xrl	a,r0
+	jnz	.ashot
+	bcall	poweruphit
+	jmp	.end
+.ashot	; normal alien shot
+	; handle power-up creation
+	bcall	powerupstart
+	; play sound
+	mov	a,#lo(tune_shotkill)
+	sel	mb0
+	call	playsound
+	sel	mb1
+	; add score
+	clr	a		; type = alien shot
+	call	addscore	; add to score
+.end	endsection ashotkillcheck
+.noshotcheck
+	endsection defshotcheck
+
+	;## game state machine
+	section gamestate
+	mov	r0,#iram_gamestate
+	mov	a,@r0
+	xrl	a,#STATE_PLAY
+	jnz	.cont1
+	jmp	.end			; still playing, nothing to do here
+.cont1	; STATE_EXP/STATE_DEAD/STATE_END
+	mov	r1,#iram_firelimit
+	mov	a,@r0
+	xrl	a,#STATE_EXP
+	jnz	.dead			; handle STATE_DEAD/STATE_END later
+	; STATE_EXP, handle ship explosion by setting iram_shipshape
+	inc	@r1			; next frame
+	mov	a,@r1
+	rr	a
+	rr	a
+	rr	a
+	rr	a
+	anl	a,#7
+	add	a,#5			; first explosion shape
+	mov	r1,#iram_ship_shape
+	mov	@r1,a
+	; check for last frame
+	xrl	a,#9			; last explosion shape +1
+	jz	.expend
+	jmp	.end
+
+.expend	; explosion finished, go to STATE_END
+	mov	@r0,#STATE_END
+	; prevent ship drawing
+	inc	r1
+	mov	@r1,#0f8h		; iram_ship_x
+	inc	r1
+	mov	@r1,#0f8h		; iram_ship_y
+	; set wait until display off
+	mov	r1,#iram_firelimit
+	mov	@r1,#200
+.toend	jmp	.end
+
+.dead	; STATE_DEAD/STATE_END
+	mov	a,@r1
+	jz	.count			; counter reached 0
+	dec	a
+	mov	@r1,a
+	jmp	.end			; counter is not 0 yet
+.count	; counter reached 0, check gamestate
+	mov	a,@r0
+	xrl	a,#STATE_DEAD
+	jz	.alive
+	; STATE_END, game over
+	mov	a,#0ffh
+	ret				; ship hit, dead
+.alive	; STATE_DEAD, counter == 0, back to playing
+	mov	@r0,#STATE_PLAY
+.end	endsection gamestate
+
+	IFDEF DEBUG_RASTER
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	mov	r0,#vdc_color		; color register
+	mov	a,#col_bck_blue | col_grd_white
+	movx	@r0,a			; set it
+	ENDIF
+
+	; show shipshot/alien collision range
+	IFDEF DEBUG_SHOT_ALIEN
+	mov	r0,#iram_alien0_x
+	mov	r1,#iram_shipshot_x
+	mov	a,@r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shot)-y(alien)
+	mov	r0,#eram_scorem
+	movx	@r0,a
+
+	mov	r0,#iram_alien0_y
+	mov	r1,#iram_shipshot_y
+	mov	a,@r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shot)-y(alien)
+	mov	r0,#eram_scorel
+	movx	@r0,a
+
+	nop
+	ENDIF
+
+	; show shipshot/alien shot collision range
+	IFDEF DEBUG_SHOT_ASHOT
+	mov	r0,#iram_ashot0_x
+	mov	r1,#iram_shipshot_x
+	mov	a,@r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shot)-y(ashot)
+	mov	r0,#eram_scorem
+	movx	@r0,a
+
+	mov	r0,#iram_ashot0_y
+	mov	r1,#iram_shipshot_y
+	mov	a,@r0
+	cpl	a
+	inc	a
+	add	a,@r1			; y(shot)-y(ashot)
+	mov	r0,#eram_scorel
+	movx	@r0,a
+
+	nop
+	ENDIF
+
+	; show alien shot position
+	IFDEF DEBUG_ASHOTS_SHOW
+	mov	r0,#DEBUG_X
+	movx	a,@r0
+	jnz	.end			; don't show moving shot
+	mov	a,@r0
+	xrl	a,#0f8h
+	jz	.end			; don't show park position
+	mov	a,@r0
+	mov	r0,#eram_scorem
+	movx	@r0,a
+
+	mov	r0,#DEBUG_Y
+	mov	a,@r0
+	mov	r0,#eram_scorel
+	movx	@r0,a
+.end
+	ENDIF
+
+	jmp	gameplay
+	endsection gameplay
+
+; clear grid, char, quads, sprites
+clearall section clearall
+	; stop drawing the playfield
+	mov	r0,#iram_ictrl	; irq-control
+	mov	@r0,#0		; no not draw the playfield
+	; stop line irq
+	stop	tcnt
+	dis	tcnti
+
+	; turn off Videopac+ gfx
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0afh		; ... extram
+	mov	r0,#eram_plusmode
+	movx	a,@r0
+	sel	mb0
+	jz	.no7400
+	call	plushide		; turn off additional gfx
+.no7400
+
+	; enable vdc, turn off gfx, set P17
+	orl	P1,#0bch	; set P17, switch to ...
+	anl	P1,#0b7h	; ... vdc
+	call	gfxoff		; harmless, outside gameplay
+	; background to black
+	mov	r0,#vdc_color
+	mov	a,#col_bck_black
+	movx	@r0,a
+	sel	mb1
+
+	; clear grid
+	clr	a
+	mov	r0,#vdc_gridh0
+	mov	r1,#02ah
+.grid	movx	@r0,a
+	inc	r0
+	djnz	r1,.grid
+
+	; clear sprites, registers start at 0
+	mov	r0,#vdc_spr3_ctrl+3
+	mov	a,#0f8h
+.spr	movx	@r0,a
+	djnz	r0,.spr
+	movx	@r0,a			; clear last register
+
+	; clear sprite shapes
+	mov	r0,#vdc_spr0_shape
+	mov	r1,#32			; 4 sprites of 8 bytes each
+	clr	a
+.shp	movx	@r0,a
+	inc	r0
+	djnz	r1,.shp
+
+	; clear chars and quads, color to black for ALN_ATTACK
+	mov	r0,#vdc_char0
+	mov	r1,#28		; 12 chars and 16 quads
+.chr	mov	a,#0f8h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	mov	a,#col_chr_black
+	movx	@r0,a
+	inc	r0
+	djnz	r1,.chr
+	ret
+	endsection clearall
+
+; initialise a new game
+initgame section initgame
+	; set score to 0
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0afh	; ... extram
+	clr	a
+	mov	r0,#eram_scoreh
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+
+	; set completion to 0
+	mov	r0,#eram_completion
+	movx	@r0,a
+
+	; set level to 1, internal representation 0
+	mov	r0,#iram_level
+	mov	@r0,a
+
+	; set shield strength
+	mov	r0,#iram_shield
+	mov	@r0,#SHIELD
+
+	ret
+	endsection initgame
+
+; initialize everything to start playing
+initlvl	section initlevel
+
+	orl	P1,#03ch	; switch to ...
+	anl	P1,#0afh	; ... extram
+
+	; set game state to play
+	mov	r0,#iram_gamestate
+	mov	@r0,#STATE_PLAY
+
+	; initialise time and frame drop counter
+	clr	a
+	mov	r0,#eram_timel
+	movx	@r0,a
+	mov	r0,#eram_frame
+	movx	@r0,a
+
+	; set sky and ground colors from ROM table
+	section colors
+	mov	r0,#iram_level
+	mov	a,@r0
+	rl	a
+	add	a,#lo(colortable)	; offset to begin of table
+	call	getcolors
+	mov	r0,#eram_plusmode
+	movx	a,@r0
+	jz	.noplus
+	; color1 background is black on VP+, grid is left intact
+	mov	a,r2
+	anl	a,#0c7h			; clear background color
+	mov	r2,a
+.noplus	mov	r0,#iram_color1
+	mov	a,r2
+	mov	@r0,a
+	inc	r0
+	mov	a,r3
+	mov	@r0,a
+	endsection colors
+
+	; initial ship position
+	mov	r0,#iram_ship_shape
+	mov	@r0,#2			; up
+	inc	r0
+	mov	@r0,#050h		; iram_ship_x
+	inc	r0
+	mov	@r0,#070h		; iram_ship_y
+
+	; park defense shot
+	mov	r0,#iram_shipshot_y
+	mov	@r0,#0f8h		; shipshot_y
+	inc	r0
+	mov	@r0,#0f8h		; shipshot_x
+	inc	r0
+	mov	@r0,#0			; shipshot_v
+
+	; initialise target vars
+	call	initbonus
+
+	; shot speed and timeouts for power-ups
+	sel	mb0
+	call	initshotspeed
+	sel	mb1
+	clr	a
+	; faster shot timeout
+	mov	r0,#eram_shottime
+	movx	@r0,a
+	; alien slowdown timeout
+	mov	r0,#eram_slowdown
+	movx	@r0,a
+
+	; init fire rate limiter
+	mov	r0,#iram_firelimit
+	mov	@r0,#0
+
+	; clear aliens and shots
+	section aliens
+	mov	r0,#iram_alien0_t
+	mov	r1,#iram_ashot0_x
+	mov	r2,#3
+	mov	a,#0f8h
+.loop	mov	@r0,#0			; iram_alien?_t
+	inc	r0
+	mov	@r0,a			; iram_alien?_y
+	inc	r0
+	mov	@r0,a			; iram_alien?_x
+	inc	r0
+	mov	@r1,a			; iram_ashot?_x
+	inc	r1
+	mov	@r1,a			; iram_ashot?_y
+	inc	r1
+	djnz	r2,.loop
+	endsection aliens
+
+	section powerups
+	mov	r0,#eram_powerup
+	clr	a
+	movx	@r0,a
+	endsection powerups
+
+	section alienlevel
+	sel	mb0
+	call	initlevelaliens
+	sel	mb1
+	endsection alienlevel
+
+	section probspawn
+	mov	r0,#eram_probspawn
+	clr	a
+	movx	@r0,a
+	endsection probspawn
+
+	; clear collision register, not only for o2em
+	sel	mb0
+	call	waitvsync
+	orl	P1,#03ch		; switch to ...
+	anl	P1,#0b7h		; ... vdc
+	mov	r0,#vdc_collision
+	clr	a
+	movx	@r0,a
+	call	waitvsync
+
+	; enable drawing the playfield
+	mov	r0,#iram_ictrl			; irq-control
+	mov	@r0,#ictrl_draw | ictrl_dirty	; draw the playfield + quads
+
+	call	gfxon
+	sel	mb1
+
+	IFDEF DEBUG_ASHOTS
+	mov	r0,#DEBUG_X
+	mov	@r0,#030h
+	inc	r0
+	mov	@r0,#060h
+	ENDIF
+
+	ret
+	endsection initlevel
+
+; To save RAM space I store the x and y speed values together in
+; one byte. But now I have the problem to extract and expand them to
+; 8 bit. I simply test the sign bit (3) and set bit 4-7 if it is set.
+; This routine works for speeds -8/+7.
+signexpand section signexpand
+	jb3	.expand			; test sign bit
+	ret
+.expand	orl	a,#0f0h			; sign bit is set, so set bits 4-7
+	ret
+	endsection signexpand
+
+; NOTE: This clears the shot after the first table entry that matched, it is
+; not possible to kill two targets with one shot any more. This means that
+; interleaved forests are not longer possible as targets!
+checktargets
+	section checktargets
+	; only check 1 shot per frame depending on timel
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#003h
+	jnz	.cont1
+.ret	ret					; frame % 4 == 0, no check
+.cont1	dec	a				; a: 0/1/2
+	rl	a				; a: 0/2/4
+	add	a,#iram_ashot0_x		; a: ashot0_x/ashot1_x/ashot2_x
+	mov	r1,a				; pointer to shot in r1
+	mov	a,@r1				; get x position of ashot
+	xrl	a,#0f8h				; check if empty
+	jz	.ret				; empty shot, don't test
+
+	; NOTE: It it necessary to test for a powerup here, if an ashot is
+	; hit by the defense shot while it is in target collision position
+	; it may already have been changed to a power-up. Removing the ashot
+	; at the end of this routine does not clear the eram_powerup. This
+	; means the next ashot in this variable will be a power-up that moves.
+	; This did happen once to me during normal gameplay and took quite a
+	; while to find.
+	; Letting the power-up kill the target is unfair, so we have to turn
+	; off target collisions for ashots. This is safe to do, power-ups
+	; don't move and the position is still overlap free, otherwise the
+	; shot would have been turned off earlier.
+	mov	r0,#eram_powerup
+	movx	a,@r0
+	xrl	a,r1
+	jz	.ret				; shot is power-up, don't test
+
+	; check if ground is reached
+	; NOTE: This has to check for 4 pixels above real ground level, the
+	; fastest shots have speed 2 every second frame, this routine is
+	; called every 4th frame, so the shot can move 4 pixels between calls.
+	; The ground y position for shots is GROUNDLEVEL - 6.
+	inc	r1				; iram_ashot?_y
+	mov	a,@r1
+	add	a,#0104h - GROUNDLEVEL + 6	; four pixel above ground
+	dec	r1				; iram_ashot?_x
+	jc	.clrshot			; too low, clear shot
+
+	; get pointer to hittable
+	mov	r0,#iram_level
+	mov	a,@r0
+	add	a,#lo(targhittab)
+	movp	a,@a
+	mov	r3,a
+	jmp	.hitlop
+
+targhittab
+	db	lo(targethit_1)
+	db	lo(targethit_2)
+	db	lo(targethit_3)
+	db	lo(targethit_4)
+	db	lo(targethit_5)
+	db	lo(targethit_6)
+	db	lo(targethit_7)
+
+	assert "hi(checktargets) == hi($-1)"
+
+.hitlop	; check for target hit, registers:
+	; R1 pointer to iram_ashot?_x
+	; R3 pointer to hit structure in ROM
+
+	call	gethit
+	mov	r6,a				; store target
+	jz	.ret				; end of hit table
+
+	; check if target still there
+	mov	r0,a
+	movx	a,@r0
+	jnz	.check
+	; nothing there, skip rest of entry
+	inc	r3
+	inc	r3
+	inc	r3
+	jmp	.hitlop
+
+.check
+	; check for y position
+	inc	r1				; iram_ashot?_y
+	mov	a,@r1				; y(ashot)
+	dec	r1				; iram_ashot?_x
+	mov	r0,a
+	call	gethit
+	add	a,r0
+	jc	.checkx				; y in hit range, check x position
+	; out of y range, skip x position data
+	inc	r3
+	inc	r3
+	jmp	.hitlop				; check next entry
+
+.checkx	; check x position
+	mov	a,@r1			; x(ashot)
+	mov 	r0,a
+	call	gethit			; x1
+	add	a,r0
+	mov	r0,a
+	call	gethit			; x2
+	add	a,r0
+	jc	.match
+	jmp	.hitlop			; check next one
+
+.match	; hit table entry matches
+
+	; check for permanent target
+	mov	a,r6
+	mov	r0,a
+	xrl	a,#eram_permtarg
+	jz	.clrshot		; only hit dummy target, clear shot
+
+	; a real target is hit, so clear target variable
+	clr	a
+	movx	@r0,a
+
+	; play sound
+	mov	a,#tune_shoot
+	sel	mb0
+	call	playsound
+	sel	mb1
+
+	; set dirty and flash flag, no dis/en protection:
+	; In the worst case this will lose the second line irq flag resulting
+	; in a wrong ground color for one frame. This is a very rare race
+	; condition and won't be noticed because the sky is flashing white
+	; in the next frame.
+	mov	r0,#iram_ictrl
+	mov	a,@r0
+	orl	a,#ictrl_dirty | ictrl_flash | 7 ; dirty, flash for 7
+	mov	@r0,a
+
+.clrshot
+	; the shot has at least hit a dummy target, so we clear the shot
+	mov	@r1,#0f8h		; x park position
+	inc	r1
+	mov	@r1,#0f8h		; y park position
+	ret
+	endsection checktargets
+
+; animate aliens, only every 8 frames
+animaliens
+	section animaliens
+	mov	r1,#eram_timel
+	movx	a,@r1			; already in extram
+	anl	a,#7
+	jnz	.end			; only animate every 8 frames, 6.2Hz
+	mov	r0,#iram_alien0_t
+	mov	r2,#3
+.loop	mov	a,@r0
+	anl	a,#0fch			; mask out type
+	xch	a,@r0			; exchange with original value
+	inc	a			; next anim frame
+	anl	a,#003h			; mask out anim frame
+	orl	a,@r0			; recombine with type
+	mov	@r0,a
+	inc	r0
+	inc	r0
+	inc	r0
+	djnz	r2,.loop
+.end	ret
+	endsection animaliens
+
+; check for level lost: all targets gone, target vars are zero padded
+levellosttargets section levellosttargets
+	mov	r0,#eram_targets
+	mov	r1,#12			; 12 targets max
+.loop	movx	a,@r0
+	jnz	.end			; found a standing target, not lost yet
+	inc	r0
+	djnz	r1,.loop
+
+	; all empty, lost
+	mov	a,#0ffh			; out of targets
+	ret
+
+.end	clr	a			; still alive
+	ret
+	endsection levellosttargets
+
+; --- This page contains the hit tables for the objects in the levels ---------
+
+	org	0d00h
+
+gethit section gethit
+	mov	a,r3
+	movp	a,@a
+	inc	r3
+	ret
+	endsection gethit
+
+targethit_forest
+	foresthit	eram_targets, 026h
+	foresthit	eram_targets+4, 066h
+	treehit		eram_targets+8, 007h
+	househit	eram_targets+9, 012h
+	db		0
+
+targethit_street
+	lantern_hit	eram_targets, 020h
+	cars_hit	eram_targets+1, 040h
+	lantern_hit	eram_targets+4, 080h
+	db		0
+
+targethit_pyramid
+	pyramidhit	eram_targets, 010h
+	db	0
+
+targethit_water
+	islandhit eram_targets, 028h
+	minisubhit eram_targets+4, 010h
+	minisubhit eram_targets+5, 088h
+	db	0
+
+targethit_ice
+	castlehit eram_targets, 020h
+	vanhit eram_targets+1, 060h
+	db	0
+
+targethit_train
+	trainhit eram_targets
+	db	0
+
+targethit_moon
+	spaceporthit eram_targets
+	spaceshiphit eram_targets+1, 060h
+	db	0
+
+	assert "hi(gethit) == hi($-1)"
+
+;RESERVED: hit tables until 0e00h
+
+	org	0e00h
+
+; Set ship shape
+setshipshape section setshipshape
+; Input
+;  A shape to set
+; Alters
+;  R0 VDC pointer
+;  R2 ROM pointer
+;  R7 loop counter
+	mov	r0,#iram_ship_shape
+	mov	a,@r0
+	rl	a
+	rl	a
+	rl	a
+	add	a,#lo(shapedata)
+	mov	r2,a
+	mov	r0,#vdc_spr0_shape
+	mov	r7,#8
+.loop	mov	a,r2
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r2
+	djnz	r7,.loop
+	ret
+	endsection setshipshape
+
+shapedata
+	; 0: right
+	db	00000011b
+	db	00001111b
+	db	00111110b
+	db	11111100b
+	db	11111100b
+	db	00111110b
+	db	00001111b
+	db	00000011b
+	; 1: right+up
+	db	11000000b
+	db	11110000b
+	db	01111100b
+	db	01111111b
+	db	00111111b
+	db	00111100b
+	db	00011000b
+	db	00011000b
+	; 2: up
+	db	00011000b
+	db	00011000b
+	db	00111100b
+	db	00111100b
+	db	01111110b
+	db	01111110b
+	db	11100111b
+	db	11000011b
+	; 3: left+up
+	db	00000011b
+	db	00001111b
+	db	00111110b
+	db	11111110b
+	db	11111100b
+	db	00111100b
+	db	00011000b
+	db	00011000b
+	; 4: left
+	db	11000000b
+	db	11110000b
+	db	01111100b
+	db	00111111b
+	db	00111111b
+	db	01111100b
+	db	11110000b
+	db	11000000b
+	; 5: explosion 0
+	db	00000000b
+	db	00000000b
+	db	00000000b
+	db	00101000b
+	db	00010000b
+	db	00101000b
+	db	00000000b
+	db	00000000b
+	; 6: explosion 1
+	db	00000000b
+	db	00000000b
+	db	01001000b
+	db	00100100b
+	db	01010000b
+	db	00000100b
+	db	01010000b
+	db	00000000b
+	; 7: explosion 2
+	db	10000010b
+	db	00101000b
+	db	01000100b
+	db	00010010b
+	db	01001000b
+	db	00010010b
+	db	10000000b
+	db	00100100b
+	; 8: explosion 3
+	db	10000010b
+	db	00100000b
+	db	00000000b
+	db	00000010b
+	db	01000000b
+	db	00000010b
+	db	10000000b
+	db	00100100b
+
+	assert "hi(setshipshape) == hi($-1)"
+
+; fill alien target vars with bonus information, fills all 10 target vars
+initbonus section initbonus
+	mov	r0,#iram_level
+	mov	a,@r0		; get level, starts with 0
+	rl	a		; *2
+	mov	r0,a
+	rl	a		; *4
+	rl	a		; *8
+	add	a,r0		; *10
+	add	a,#lo(levelbonus)
+	mov	r2,a
+	mov	r0,#eram_targets
+	mov	r1,#10		; 10 target vars
+.loop	mov	a,r2
+	movp	a,@a
+	movx	@r0,a
+	inc	r0
+	inc	r2
+	djnz	r1,.loop
+	; set permanent target
+	mov	r0,#eram_permtarg
+	mov	a,#0ffh
+	movx	@r0,a
+	ret
+	endsection initbonus
+
+; check target vars if bonus information is still intact, all 10 target vars
+;** called from bank2
+checkbonus section checkbonus
+	mov	r0,#iram_level
+	mov	a,@r0		; get level, starts with 0
+	rl	a		; *2
+	mov	r0,a
+	rl	a		; *4
+	rl	a		; *8
+	add	a,r0		; *10
+	add	a,#lo(levelbonus)
+	mov	r2,a
+	mov	r0,#eram_targets
+	mov	r1,#10		; 10 target vars
+.loop	mov	a,r2
+	movp	a,@a
+	mov	r3,a
+	movx	a,@r0
+	xrl	a,r3		; compare target with ROM table
+	jnz	.diff
+	inc	r0
+	inc	r2
+	djnz	r1,.loop
+	; no difference found
+	mov	a,#1
+	jmp	switchmb1_2
+
+.diff	; found difference
+	clr	a
+	jmp	switchmb1_2
+	endsection checkbonus
+
+; bonus table macros to allow level mapping
+bonustable_forest macro
+	db	BONUS_TREE, BONUS_TREE, BONUS_TREE, BONUS_TREE	; forest
+	db	BONUS_TREE, BONUS_TREE, BONUS_TREE, BONUS_TREE	; forest
+	db	BONUS_TREE					; tree
+	db	BONUS_HOUSE					; house
+	endm
+
+bonustable_street macro
+	db	BONUS_LANTERN				; street lantern
+	db	BONUS_CAR, BONUS_CAR, BONUS_CAR		; 3 cars
+	db	BONUS_LANTERN				; street lantern
+	db	0,0,0,0,0				; empty
+	endm
+
+bonustable_pyramid macro
+	db	BONUS_BIGPY, BONUS_MIDPY		; big/middle pyramid
+	db	BONUS_SMLPY				; small pyramid
+	db	BONUS_TINPY, BONUS_TINPY		; tiny pyramid
+	db	0,0,0,0,0				; empty
+	endm
+
+bonustable_water macro
+	db	BONUS_HOUSE				; house on island
+	db	BONUS_HOUSE				; house on island
+	db	BONUS_HOUSE				; house on island
+	db	BONUS_TREE				; tree on island
+	db	BONUS_MINSUB, BONUS_MINSUB		; 2 mini submarines
+	db	0,0,0,0					; empty
+	endm
+
+bonustable_ice macro
+	db	BONUS_CASTLE				; castle
+	db	BONUS_VAN, BONUS_VAN, BONUS_VAN		; vans
+	db	0,0,0,0,0,0				; empty
+	endm
+
+bonustable_train macro
+	db	BONUS_TRAINCAR, BONUS_TRAINCAR		; 2 train cars
+	db	BONUS_TRAINENG				; engine of the train
+	db	0,0,0,0,0,0,0				; empty
+	endm
+
+bonustable_moon macro
+	db	BONUS_SPACEPORT				; space port
+	db	BONUS_SPACESHIP				; space ship
+	db	0,0,0,0,0,0,0,0				; empty
+	endm
+
+levelbonus
+	bonustable_1
+	assert	"$ - levelbonus == 10"
+
+	bonustable_2
+	assert	"$ - levelbonus == 20"
+
+	bonustable_3
+	assert	"$ - levelbonus == 30"
+
+	bonustable_4
+	assert	"$ - levelbonus == 40"
+
+	bonustable_5
+	assert	"$ - levelbonus == 50"
+
+	bonustable_6
+	assert	"$ - levelbonus == 60"
+
+	bonustable_7
+	assert	"$ - levelbonus == 70"
+
+	assert "hi(initbonus) == hi($)"
+
+; let power-up disappear after time has expired
+powerupexpire section powerupexpire
+	mov	r0,#eram_powerup
+	movx	a,@r0
+	jnz	.active
+.ret	ret
+.active	inc	r0		; eram_powertime
+	movx	a,@r0
+	dec	a		; reduce time
+	movx	@r0,a
+	jnz	.ret		; time has not run out, finished
+	; clear ashot used for power-up
+	dec	r0
+	movx	a,@r0
+	mov	r1,a		; pointer to ashot used for power-up
+	clr	a
+	movx	@r0,a		; clear eram_powerup
+	mov	@r1,#0f8h	; iram_ashot?_x
+	inc	r1
+	mov	@r1,#0f8h	; iram_ashot?_y
+	ret
+	endsection powerupexpire
+
+	org	0f00h
+
+; add the score for alien type a
+addscore section addscore
+	add	a,#lo(scoretable)
+	movp	a,@a
+	mov	r0,#eram_scorel
+	mov	r1,a			; points to add
+	movx	a,@r0			; get scorel
+	add	a,r1			; add new points
+	da	a			; BCD arithmetics
+	movx	@r0,a
+	dec	r0
+	movx	a,@r0			; scorem
+	addc	a,#0
+	da	a
+	movx	@r0,a			; new scorem
+	dec	r0
+	movx	a,@r0			; scoreh
+	addc	a,#0
+	da	a
+	movx	@r0,a			; new scoreh
+	jc	.mxscor
+	ret
+.mxscor	; maximum score reached
+	mov	a,#099h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	ret
+	endsection addscore
+
+;** called from bank 2
+addscoreb2 section addscoreb2
+	call	addscore
+	jmp	switchmb1_2
+	endsection addscoreb2
+
+scoretable
+	db	1			; alien shot
+	db	005h			; ALN_UFO
+	db	010h			; ALN_DISC
+	db	050h			; ALN_BOMBER
+	db	020h			; ALN_RANDOM
+	db	015h			; ALN_ATTACK
+	db	025h			; ALN_BOOMERANG
+	db	010h			; power-up 10
+
+	assert "hi(addscore) == hi($)"
+
+getcolors section getcolors
+	mov	r0,a
+	movp	a,@a
+	mov	r2,a
+	inc	r0
+	mov	a,r0
+	movp	a,@a
+	mov	r3,a
+	ret
+	endsection getcolors
+
+; sky colors (only for G7000) and ground colors
+colortable
+	db	colsky_1, colgnd_1
+	db	colsky_2, colgnd_2
+	db	colsky_3, colgnd_3
+	db	colsky_4, colgnd_4
+	db	colsky_5, colgnd_5
+	db	colsky_6, colgnd_6
+	db	colsky_7, colgnd_7
+
+	assert "hi(colortable) == hi($)"
+
+; get maximum ship y position
+; Return
+;  A y value, see common.h for more explanation
+; Trash
+;  R0 used to get the current level
+getmaxshipy
+	mov	r0,#iram_level
+	mov	a,@r0
+	add	a,#lo(maxshipytab)
+	movp	a,@a
+	ret
+
+maxshipytab
+	db	maxshipy_1
+	db	maxshipy_2
+	db	maxshipy_3
+	db	maxshipy_4
+	db	maxshipy_5
+	db	maxshipy_6
+	db	maxshipy_7
+
+	assert "hi(getmaxshipy) == hi($-1)"
+
+; Set defense shot initial position and speed depending on the current
+; shape of the defense ship. Due to the shape differences the
+; y position is already adjusted partially.
+getdefenseshottable section getdefenseshottable
+; Output:
+;  R2 x position offset
+;  R3 y position offset
+;  R4 speed
+; Trash:
+;  R0 used as rom pointer
+	mov	r0,#iram_ship_shape	; shape of ship (0=right,ccw)
+	mov	a,@r0			; get it
+	rl	a			; *2
+	add	a,@r0			; *3
+	add	a,#lo(defenseshottable)
+	mov	r0,a
+	movp	a,@a
+	mov	r2,a			; x position offset from table
+	inc	r0
+	mov	a,r0
+	movp	a,@a
+	mov	r3,a			; y position offset from table
+	inc	r0
+	mov	a,r0
+	movp	a,@a
+	mov	r4,a			; speed value from table
+	mov	r5,a
+	; check speed multiplicator
+	mov	r0,#eram_shotmulti
+	movx	a,@r0
+	jnz	.spdmul
+	ret
+.spdmul	; multiply speed by shot speed multiplicator
+	mov	r7,a			; shot speed multiplicator
+	mov	a,r5			; y speed in low nibble, high nibble gets trashed
+.loopy	add	a,r5
+	djnz	r7,.loopy
+	anl	a,#0fh			; mask out y speed
+	xch	a,r4
+	swap	a
+	mov	r5,a
+	movx	a,@r0
+	mov	r7,a			; shot speed multiplicator
+	mov	a,r5			; x speed in low nibble, high nibble gets trashed
+.loopx	add	a,r5
+	djnz	r7,.loopx
+	swap	a
+	anl	a,#0f0h			; mask out x speed
+	orl	a,r4			; combine with y speed
+	mov	r4,a
+	ret
+
+defenseshottable
+	db	007h, 006h, 010h	; right
+	db	007h, 0fah, 01eh	; right+up
+	db	000h, 0fah, 00eh	; up
+	db	0fah, 0fah, 0feh	; left+up
+	db	0fah, 006h, 0f0h	; left
+
+	assert "hi(getdefenseshottable) == hi($)"
+
+	endsection getdefenseshottable
+
+; --- some debugging code at the end ------------------------------------------
+
+	org	0f90h
+
+	IFDEF DEBUG_ASHOTS
+; no killashot when debugging
+killashot
+	ret
+
+	; controlling ashot0
+debug_keycontrol section debug_keycontrol
+	mov	r0,#eram_timel
+	movx	a,@r0
+	anl	a,#003h
+	xrl	a,#DEBUG_FRAMENUM
+	jz	.do
+	ret
+.do	; clear speed and power-up when at park position
+	mov	r0,#DEBUG_X
+	mov	a,@r0
+	xrl	a,#0f8h
+	jnz	.keyboard
+	movx	@r0,a
+	mov	r0,#eram_powerup
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+.keyboard
+	sel	mb0
+	call	readkey
+	sel	mb1
+	mov	r7,a
+	xrl	a,#011h		; 'W'
+	jz	.up
+	mov	a,r7
+	xrl	a,#022h		; 'X'
+	jz	.down
+	mov	a,r7
+	xrl	a,#020h		; 'A'
+	jz	.left
+	mov	a,r7
+	xrl	a,#01ah		; 'D'
+	jz	.right
+	mov	a,r7
+	xrl	a,#00ch		; 'SPACE', fall down fast
+	jz	.fall
+	mov	a,r7
+	xrl	a,#00fh		; power-up
+	jz	.power
+	ret
+
+.left	mov	r0,#DEBUG_X
+	mov	a,@r0
+	dec	a
+	mov	@r0,a
+	ret
+
+.right	mov	r0,#DEBUG_X
+	inc	@r0
+	ret
+
+.up	mov	r0,#DEBUG_Y
+	mov	a,@r0
+	dec	a
+	mov	@r0,a
+	ret
+
+.down	mov	r0,#DEBUG_Y
+	inc	@r0
+	ret
+
+.fall	mov	r0,#DEBUG_X
+	mov	a,#2
+	movx	@r0,a
+	ret
+
+.power	mov	r0,#eram_powerup
+	mov	a,#DEBUG_X
+	movx	@r0,a
+	inc	r0
+	mov	a,#255
+	movx	@r0,a		; eram_powertime
+	inc	r0
+	mov	a,#01bh
+	movx	@r0,a		; eram_powertype
+	ret
+
+	endsection debug_keycontrol
+
+	ELSE
+	IFDEF DEBUG_POWERUP
+
+; no killashot when debugging
+killashot
+	ret
+
+debug_power section debug_powerup
+	; freeze when power-up at 0f8h
+	mov	r0,#eram_powerup
+	movx	a,@r0
+	jz	.end			; skip empty power-up
+	mov	r0,a
+	mov	a,@r0
+	xrl	a,#0f8h
+	jnz	.end			; skip non-moving power-up
+.stop	jmp	.stop
+.end	ret
+	endsection debug_powerup
+
+	ELSE
+
+; remove the alien shot which has hit the ship
+; The range I check for is small enough in x direction that it can only
+; be one ashot, but I check all just to be sure. I don't need to check
+; for power-ups, because the collect range is bigger, it is already
+; collected at this point. Theoretically I don't need to check the y position,
+; the alien shots always have non-overlapping x positions, but I check it
+; just to be sure.
+killashot section killashot
+	mov	r1,#iram_ashot0_x
+	mov	r2,#3
+	mov	r0,#iram_ship_x
+.loop	mov	a,@r1			; iram_ashot?_x
+	cpl	a
+	inc	a
+	add	a,@r0			; x(ship)-x(ashot)
+	; remove when -7/7 0f9h/009h
+	add	a,#7			; 0/00eh
+	add	a,#0f1h
+	inc	r1			; iram_ashot?_y
+	inc	r0			; iram_ship_y
+	jc	.next			; outside range
+	mov	a,@r1
+	cpl	a
+	inc	a
+	add	a,@r0			; y(ship)-y(ashot)
+	; remove when -17/15 0efh/00fh
+	add	a,#011h			; 0/020h
+	add	a,#0dfh
+	jc	.next			; outside range
+	; in range, park alien shot
+	dec	r1			; iram_ashot?_x
+	mov	@r1,#0f8h
+	inc	r1			; iram_ashot?_y
+	mov	@r1,#0f8h
+.next	inc	r1			; next iram_ashot?_y
+	dec	r0			; iram_ship_x
+	djnz	r2,.loop
+	ret
+	endsection killashot
+
+	org	0fe8h
+
+	db	0, "$Revision: 1.509 $", 0
+
+	ENDIF
+	ENDIF
+
+	end

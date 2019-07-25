@@ -1,0 +1,152 @@
+; how to use the clock routines
+; Version 1.0
+;
+; History:
+; Version 1.0
+;   first release
+;
+; This demoprogram displays a clock. It can be controlled with the
+; joystick. Moving left stops the clock, moving right restarts it.
+; The direction can be changed with moving up and down. On PAL Systems
+; the clock is too slow, for the BIOS are 60 frames = 1 second.
+; At every full minute the program plays a sound.
+
+; Copyright (C) 1997 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+	
+	org	400h
+
+	include	"g7000.h"
+
+	jmp	selectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+timer	retr			; we don't need timer
+
+start
+	; need to initialise quad0/1
+	call	gfxoff
+
+	; set the start time = 01:00
+	call	extramenable
+	mov	r0,#eram_minutes
+	mov	a,#01h		; BCD
+	movx	@r0,a		; 1 minutes
+	mov	r0,#eram_seconds
+	mov	a,#01h		; BCD
+	movx	@r0,a		; 1 second, will roll over immediatly
+
+	; initialise the display
+	call	vdcenable
+	mov	r3,#020h	; x position
+	mov	r4,#040h	; y position
+	mov	r6,#col_chr_white
+	call	initclock
+
+	; activate the clock
+	call	waitvsync	; make sure there is no roll
+				; over before we want it
+	mov	r0,#iram_clock
+	mov	a,#03ah
+	mov	@r0,a		; start clock backwards
+				; rolls over at first vsync
+				; and initialises display in
+				; first doclock
+	call	gfxon
+
+loop
+	call	waitvsync	; once per frame
+
+	mov	r4,#040h	; y position, same as above !!
+	mov	r6,#col_chr_white
+	call	doclock		; update clock, if necessary
+
+	; test the time and play sound every minute
+	call	extramenable
+	mov	r0,#eram_seconds
+	movx	a,@r0
+	jnz	nosound
+
+	; only play sound, if count=0 and still counting
+	mov	r0,#iram_clock
+	mov	a,@r0
+	anl	a,#0ffh-clock_forward
+	jnz	nosound
+
+	; now play the sound
+	mov	a,#tune_select2
+	call	playsound
+
+nosound
+	; test the joystick
+	mov	r1,#0
+	call	getjoystick
+
+	; get value to manipulate
+	mov	r0,#iram_clock
+	mov	a,@r0
+	mov	r7,a
+
+	; test left/right
+	mov	a,r2			; x offset
+	inc	a
+	jnz	joy_noleft
+	; left=stop clock
+	mov	a,#clock_stop
+	orl	a,r7			; set clock_stop
+	mov	r7,a
+	jmp	joy_noright		; left = not right
+joy_noleft
+	dec	a
+	dec	a
+	jnz	joy_noright
+	; right=start clock
+	mov	a,#0ffh-clock_stop
+	anl	a,r7			; clear clock_stop
+	mov	r7,a
+joy_noright
+	mov	a,r3			; y offset	
+	inc	a
+	jnz	joy_noup
+	; up=count forwards
+	mov	a,#clock_forward
+	orl	a,r7			; set clock_forward
+	mov	r7,a
+	jmp	joy_end			; up = not down
+joy_noup
+	dec	a
+	dec	a
+	jnz	joy_end
+	; down=count backwards
+	mov	a,#0ffh-clock_forward
+	anl	a,r7			; clear clock_forward
+	mov	r7,a
+joy_end
+	; put new value back into iram_clock
+	mov	a,r7
+	mov	@r0,a
+
+	jmp	loop			; next frame
+
+	end

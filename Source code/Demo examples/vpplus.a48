@@ -1,0 +1,381 @@
+; Small demonstration for the Videopac+ G7400 by Soeren Gust
+; Version 1.2
+
+; $Id: vpplus.a48 390 2003-07-19 12:41:28Z sgust $
+
+; History:
+; Version 1.2
+;   added OPNB marker to show o2em that Pin B is left open
+;
+; Version 1.1
+;   added VDC char to demonstrate box mode with Pin B open
+;
+; Version 1.0
+;   first release
+;
+; This program shows some of the Videopac+ G7400 text capabilities
+
+; Copyright (C) 2002 by Soeren Gust, sgust@ithh.informationstheater.de
+
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 2 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, write to the Free Software
+; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+; You can always get the latest version at http://soeren.informationstheater.de
+
+	cpu	8048
+
+	include "g7000.h"
+
+	org	400h
+
+	jmp	plusselectgame	; RESET
+	jmp	irq		; interrupt
+	jmp	timer		; timer
+	jmp	vsyncirq	; VSYNC-interrupt
+	jmp	start		; after selectgame
+	jmp	soundirq	; sound-interrupt
+
+	db	"OPNB"		; marker for o2em
+
+timer	retr
+
+start
+	; test for VP+ machine
+	; If we run on a Videopac+ we are in bank 1.
+	in	a,P1
+	anl	a,#003h
+	xrl	a,#1
+	jz	plus
+	jmp	normal
+
+plus	; this is a videopac+
+	mov	a,#0ffh		; all VP+ colors dark
+	mov	r7,#0feh	; only black transparent
+	call	plusmode
+
+	call	plusenable	; use VP+ chip
+
+	; redefine char 0a0h
+	mov	r7,#plus_cmd_brow
+	mov	r6,#01fh
+	call	pluscmd		; set cursor to home
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrni
+	call	pluscmd		; do not move cursor
+	mov	r6,#000h
+	mov	r7,#0a0h
+	call	plusdata	; print char to define
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wrsl
+	call	pluscmd		; char bitmap follows
+	mov	r2,#chardata & 0ffh
+	mov	r3,#10
+.char	call	getchar
+	mov	r6,a
+	mov	r7,a
+	call	plusdata
+	inc	r2
+	djnz	r3,.char
+
+	; back to normal
+	mov	r7,#plus_cmd_loadm
+	mov	r6,#plus_loadm_wr
+	call	pluscmd		; draw normal chars
+
+	; erase screen
+	mov	r7,#plus_cmd_brow
+	mov	r6,#01fh
+	call	pluscmd		; first line
+	mov	r2,#40		; 40 columns
+.cls1	mov	r3,#25		; 25 lines (one is not visible normally)
+.cls2	mov	r6,#0
+	mov	r7,#' '		; space
+	call	plusdata
+	djnz	r3,.cls2
+	djnz	r2,.cls1
+
+	; show "Hallo World" and self defined char
+	mov	r7,#plus_cmd_brow
+	mov	r6,#01fh
+	call	pluscmd		; first line
+	mov	r2,#hello & 0ffh
+	mov	r6,#col_plus_white | col_patr_stable
+	call	printstr
+	
+	; show "Double Width"
+	mov	r7,#plus_cmd_brow
+	mov	r6,#000h
+	call	pluscmd		; second line
+	mov	r2,#width & 0ffh
+	mov	r6,#col_plus_red | col_patr_dwdth | col_patr_stable
+	call	printstr
+	
+	; show "Double Height"
+	mov	r7,#plus_cmd_brow
+	mov	r6,#001h
+	call	pluscmd		; line 3
+	mov	r2,#height & 0ffh
+	mov	r6,#col_plus_blue | col_patr_dhght | col_patr_stable
+	call	printstr
+	mov	r7,#plus_cmd_brow
+	mov	r6,#002h
+	call	pluscmd		; line 4
+	mov	r2,#height & 0ffh
+	mov	r6,#col_plus_blue | col_patr_dhght | col_patr_stable
+	call	printstr
+	
+	; "Inverted" in line 5
+	mov	r7,#plus_cmd_brow
+	mov	r6,#003h
+	call	pluscmd		; line 5
+	mov	r2,#invert & 0ffh
+	mov	r6,#col_plus_green | col_patr_invrt | col_patr_stable
+	call	printstr
+
+	; blink
+	mov	r7,#plus_cmd_brow
+	mov	r6,#4
+	call	pluscmd		; line 6
+	mov	r6,#col_plus_violet
+	mov	r2,#blink & 0ffh
+	call	printstr
+
+	; "cyan background"
+	mov	r7,#plus_cmd_brow
+	mov	r6,#005h
+	call	pluscmd		; line 7
+	mov	r6,#col_patr_blck | col_pbck_cyan | col_patr_stable
+	mov	r7,#0		; block gfx space
+	call	plusdata
+	mov	r2,#back & 0ffh
+	mov	r6,#col_plus_white | col_patr_stable
+	call	printstr
+
+	; show serial attributes
+	mov	r7,#plus_cmd_brow
+	mov	r6,#006h
+	call	pluscmd		; line 8
+	; concealed
+	mov	r6,#col_pbck_black | col_plus_black
+	mov	r7,#col_satr_enable | col_satr_conc
+	call	plusdata
+	mov	r2,#conceal & 0ffh
+	mov	r6,#col_plus_yellow | col_patr_stable
+	call	printstr
+	; boxed
+	mov	r6,#col_pbck_black | col_plus_black
+	mov	r7,#col_satr_enable | col_satr_box
+	call	plusdata
+	mov	r2,#boxed & 0ffh
+	mov	r6,#col_plus_yellow | col_patr_stable
+	call	printstr
+	; underlined text
+	mov	r6,#col_pbck_black | col_plus_black
+	mov	r7,#col_satr_enable | col_satr_line
+	call	plusdata
+	mov	r2,#lined & 0ffh
+	mov	r6,#col_plus_yellow | col_patr_stable
+	call	printstr
+
+	; now print normal charset
+	mov	r7,#plus_cmd_brow
+	mov	r6,#007h
+	call	pluscmd		; line 9
+	mov	r2,#080h
+	mov	r3,#0
+	mov	r6,#col_plus_white | col_patr_stable
+.chars	mov	a,r3
+	mov	r7,a
+	call	plusdata
+	inc	r3
+	djnz	r2,.chars
+
+	; now print spaced block gfx
+	mov	r7,#plus_cmd_brow
+	mov	r6,#00bh
+	call	pluscmd		; line 13
+	mov	r2,#040h
+	mov	r3,#0
+	mov	r6,#col_patr_blck | col_pbck_black | col_plus_white | col_patr_stable
+.block	mov	a,r3
+	mov	r7,a
+	call	plusdata
+	inc	r3
+	djnz	r2,.block
+
+	; now print filled block gfx
+	mov	r7,#plus_cmd_brow
+	mov	r6,#00dh
+	call	pluscmd		; line 15
+	mov	r2,#040h
+	mov	r3,#plus_blck_full
+	mov	r6,#col_patr_blck | col_pbck_black | col_plus_white | col_patr_stable
+.block2	mov	a,r3
+	mov	r7,a
+	call	plusdata
+	inc	r3
+	djnz	r2,.block2
+
+	; enter keyboard check loop
+	section keyboard
+	mov	a,#plus_loadr_blnk | plus_loadr_srow | plus_loadr_dspl
+	mov	r2,a
+.loop	mov	a,r2
+	call	plusloadr
+	call	waitforkey
+	mov	r7,a
+	xrl	a,#023h		; C
+	jnz	.skip1
+	jmp	.conceal
+.skip1	mov	a,r7
+	xrl	a,#025h		; B
+	jnz	.skip2
+	jmp	.box
+.skip2	mov	a,r7
+	xrl	a,#00eh		; L
+	jnz	.skip3
+	jmp	.blink
+.skip3	mov	a,r7
+	xrl	a,#024h		; V
+	jnz	.skip4
+	jmp	.vdc
+.skip4
+	jmp	.loop
+
+	; toggle conceal bit
+.conceal
+	mov	a,r2
+	xrl	a,#plus_loadr_conc
+	mov	r2,a
+	jmp	.loop
+
+	; toggle boxed bit
+.box
+	mov	a,r2
+	xrl	a,#plus_loadr_box
+	mov	r2,a
+	jmp	.loop
+
+	; toggle blink bit
+.blink
+	mov	a,r2
+	xrl	a,#plus_loadr_blnk
+	mov	r2,a
+	jmp	.loop
+
+	; toggle VDC char
+.vdc
+	call	vdcenable
+	call	gfxoff
+
+	mov	r0,#vdc_char0
+	movx	a,@r0
+	xrl	a,#0f8h
+	jnz	.clearchar
+	mov	r3,#35h		; x-position
+	mov	r4,#46h		; y-position
+	mov	r5,#3ah		; char
+	mov	r6,#col_chr_white
+	call	printchar	; print it
+
+	call	gfxon
+	call	plusenable
+	jmp	.loop
+.clearchar
+	mov	a,#0f8h
+	movx	@r0,a
+	inc	r0
+	movx	@r0,a
+	call	gfxon
+	call	plusenable
+	jmp	.loop
+
+	endsection keyboard
+
+stop	jmp	stop
+
+	align 256
+
+printstr section printstr
+	mov	a,r2
+	movp	a,@a
+	jnz	.cont
+	ret
+.cont	mov	r7,a
+	call	plusdata
+	inc	r2
+	jmp	printstr
+	endsection printstr
+
+hello	db	"Hello, World! ",0a0h,0
+
+width	db	"DDoouubbllee  WWiiddtthh  ",0a0h,0a0h,0
+
+height	db	"Double Height ",0a0h,0
+
+invert	db	"Inverted ",0a0h,0
+
+blink	db	"Blinking ",0a0h,0
+
+back	db	"White on cyan background ",0a0h,0
+
+conceal	db	"Concealed",0
+
+boxed	db	"Boxed",0
+
+lined	db	"Underlined",0
+
+; get char data
+getchar	mov	a,r2
+	movp	a,@a
+	ret
+
+chardata
+	db	00111100b
+	db	01000010b
+	db	10000001b
+	db	10100101b
+	db	10000001b
+	db	10100101b
+	db	10011001b
+	db	10000001b
+	db	01000010b
+	db	00111100b
+
+	align 256
+
+; a non-plus machine, just print an error message
+normal	section normal
+	call	vdcenable
+	call	gfxoff
+	mov	r0,#vdc_char0
+	mov	r3,#20h		; x-position
+	mov	r4,#40h		; y-position
+	mov	r2,#08h		; length
+	mov	r1,#warnstr & 0ffh	; the string to print, must be in the same page
+.loop	mov	a,r1		; get pointer
+	movp	a,@a		; get char
+	mov	r5,a		; into the right register
+	inc	r1		; advance pointer
+	mov	r6,#col_chr_white
+	call	printchar	; print it
+	djnz	r2,.loop	; do it again
+	call	gfxon		; lets see what is written
+
+stop	jmp	stop
+
+	endsection normal
+
+warnstr
+	db	02dh, 012h, 012h, 01ah, 00ch, 024h, 00fh, 010h
